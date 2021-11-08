@@ -134,12 +134,10 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
         self.ps_dim = ps_dim
         self.n_obs = n_obs
         self.nparallel = nparallel
+        self.mean_visibility_fg = None
 
         self.use_analytical_noise = use_analytical_noise
         self.include_fourierGaussianBeam = include_fourierGaussianBeam
-
-        # set this as False so we only do this once
-        self.meanVis_exist = False
 
     def setup(self):
         super().setup()
@@ -167,10 +165,10 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
         """
         self.baselines_type = ctx.get("baselines_type")
         visibilities = ctx.get("visibilities")
-        
+
         # Add mean visibility of foreground to the power
-        if self.meanVis_exist == True:
-            visibilities += ctx.get("mean_visibility_fg")
+        if self.mean_visibility_fg is not None:
+            visibilities += self.mean_visibility_fg
             
         p_signal = self.compute_power(visibilities)
 
@@ -215,12 +213,12 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
         # every iter).
         if self.foreground_cores and not any([fg._updating for fg in self.foreground_cores]):
             if not self.use_analytical_noise:
-                mean, covariance = self.numerical_covariance(
+                mean, covariance = self.numerical_covariance(ctx, 
                     nrealisations=self.nrealisations, nthreads=self._nthreads
                 )
             elif self.nrealisations!=0:
-                # Still getting mean numerically for now...
-                mean = self.numerical_covariance(nrealisations=self.nrealisations, nthreads=self._nthreads)[0]
+                #Still getting mean numerically for now...
+                mean = self.numerical_covariance(ctx,nrealisations=self.nrealisations, nthreads=self._nthreads)[0]
 
                 covariance = self.analytical_covariance(self.u, self.eta,
                                                         np.median(self.frequencies),
@@ -328,6 +326,7 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
         if self.ps_dim == 2:
             cov = []
             grid_weights = self.grid_weights
+
             for ii, sig_eta in enumerate(signal_power):
                 x = (1 / grid_weights[ii] * np.diag(sig_eta)**2)
                 x[np.isnan(x)] = 0
@@ -339,7 +338,7 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
             x[np.isnan(x)] = 0
             return x
 
-    def numerical_covariance(self, params={}, nrealisations=200, nthreads=1):
+    def numerical_covariance(self, ctx, params={}, nrealisations=200, nthreads=1):
         """
         Calculate the covariance of the foregrounds.
     
@@ -402,7 +401,7 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
         
         self.meanVis_exist = True
 
-        ctx.add("mean_visibility_fg", vis_mean)
+        self.mean_visibility_fg = vis_mean
 
         return mean, cov
 
