@@ -546,7 +546,7 @@ class CoreInstrumental(CoreBase):
             box = self.tile_and_coarsen(box, box_size)
 
         # Convert to Jy/sr
-        box *= mK_to_Jy_per_sr(self.instrumental_frequencies)
+        box *= mK_to_Jy_per_sr(self.instrumental_frequencies).value
 
         return box
 
@@ -585,12 +585,14 @@ class CoreInstrumental(CoreBase):
         lightcone = ctx.get("lightcone")
 
         # Compute visibilities from EoR simulation
-        box = 0
         if lightcone is not None:
-            box += self.prepare_sky_lightcone(lightcone.brightness_temp)
+            box = self.prepare_sky_lightcone(lightcone.brightness_temp)
 
             ctx.remove("lightcone")
             del lightcone # to save memory
+        else:
+            # this allows us to only simulate foreground with no cosmic signal
+            box = 0
         
         # Now get foreground visibilities and add them in
         foregrounds = ctx.get("foregrounds", [])
@@ -598,7 +600,7 @@ class CoreInstrumental(CoreBase):
         # Get the total brightness
         for fg, cls in zip(foregrounds, self.foreground_cores):
             if fg.unit == "mK":
-                box += self.prepare_sky_foreground(fg, cls) * mK_to_Jy_per_sr(self.instrumental_frequencies)
+                box += self.prepare_sky_foreground(fg, cls) * mK_to_Jy_per_sr(self.instrumental_frequencies).value
             else: # should be in Jy
                 box += self.prepare_sky_foreground(fg, cls)
 
