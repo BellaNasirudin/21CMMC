@@ -8,6 +8,7 @@ import io
 import re
 from glob import glob
 from os.path import basename, dirname, join, splitext
+from distutils.core import Extension
 
 
 def _read(*names, **kwargs):
@@ -85,4 +86,12 @@ setup(
             "Cython",
         ],
     },
+    ext_modules=[
+        Extension(
+            'fg_instrumental.c_routines',
+            ['src/fg_instrumental/routines.c'],
+            extra_compile_args = ['-Ofast']
+        ),
+
+    ]
 )
