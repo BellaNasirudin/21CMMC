@@ -546,7 +546,7 @@ class CoreInstrumental(CoreBase):
             box = self.tile_and_coarsen(box, box_size)
 
         # Convert to Jy/sr
-        box *= mK_to_Jy_per_sr(self.instrumental_frequencies).value
+        box *= mK_to_Jy_per_sr(self.instrumental_frequencies)
 
         return box
 
@@ -600,7 +600,7 @@ class CoreInstrumental(CoreBase):
         # Get the total brightness
         for fg, cls in zip(foregrounds, self.foreground_cores):
             if fg.unit == "mK":
-                box += self.prepare_sky_foreground(fg, cls) * mK_to_Jy_per_sr(self.instrumental_frequencies).value
+                box += self.prepare_sky_foreground(fg, cls) * mK_to_Jy_per_sr(self.instrumental_frequencies)
             else: # should be in Jy
                 box += self.prepare_sky_foreground(fg, cls)
 

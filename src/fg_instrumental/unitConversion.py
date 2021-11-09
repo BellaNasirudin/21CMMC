@@ -26,7 +26,7 @@ def mK_to_Jy_per_sr(z):#, cellsize, distances):
 
     flux_density = 1e26 * intensity.to(un.W / (un.Hz * un.m ** 2))
     
-    return flux_density / (1 * un.sr) #* (( cellsize ) / distances)**2
+    return (flux_density / (1 * un.sr)).value #* (( cellsize ) / distances)**2
 
 def redshifts_to_frequencies(z):
     """The cosmological redshift (of signal) associated with each frequency"""
@@ -137,3 +137,26 @@ def lm_to_theta_phi(l, m):
     phi[index] = 0
 
     return theta, phi
+    
+def obsUnits_to_cosmoUnits(power, sky_size, frequencies, kperp, kpar):
+    z_mid = np.mean(frequencies_to_redshifts(frequencies))
+
+    power_cosmo = power * (un.W / un.m**2 / un.Hz ) **2 * un.Hz**2 / mK_to_JyperSr(z_mid)**2 * (hz_to_mpc(frequencies[0], frequencies[-1]))**2 * (sr_to_mpc2(z_mid))**2
+
+    # divide by volume
+    power_cosmo = power_cosmo / (sky_size**2 * un.sr * sr_to_mpc2(z_mid) * 10e6 *un.Hz / Gz(z_mid))
+
+    kperp = k_perpendicular(kperp, z_mid).value
+    kpar = k_parallel(kpar, z_mid).value
+
+    return power_cosmo, kperp, kpar # mK^2 Mpc^3 h^-3, h Mpc^-1, h Mpc^-1
+
+def kparallel_wedge(k_perp, field_of_view, redshift):
+
+    E_z = cosmo.efunc(redshift)
+    H_0 = (cosmo.H0).to(un.m/(un.Mpc * un.s))
+
+    functionDc_z = lambda x: 1 / cosmo.efunc(x)
+    Dc_z = integrate.quad(functionDc_z, 0, np.max(redshift))[0]
+
+    return k_perp * np.sin(field_of_view) * E_z * Dc_z / (1 + redshift) #* H_0 / const.c

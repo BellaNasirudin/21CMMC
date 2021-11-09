@@ -14,7 +14,7 @@ from astropy import constants as const
 from astropy.cosmology import Planck15 as cosmo
 from astropy import units as un
 from cached_property import cached_property
-from powerbox.dft import fft, fftfreq
+import powerbox.dft
 from powerbox.tools import angular_average_nd
 from py21cmmc.core import CoreLightConeModule
 from py21cmmc.likelihood import LikelihoodBaseFile
@@ -24,7 +24,7 @@ from scipy import signal
 from .core import CoreInstrumental, ForegroundsBase
 from .util import lognormpdf
 import os
-from fg_instrumental.unitConversion import mK_to_Jy_per_sr, k_perpendicular, k_parallel
+from fg_instrumental.unitConversion import mK_to_Jy_per_sr, k_perpendicular, k_parallel, obsUnits_to_cosmoUnits, kparallel_wedge
 
 class NoDaemonProcess(multiprocessing.Process):
     @property
@@ -52,7 +52,7 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
 
     def __init__(self, n_uv=999, n_ubins=30, uv_max=None, u_min=None, u_max=None, frequency_taper=np.blackman, 
                  nrealisations=100, nthreads=1, model_uncertainty=0.15, eta_min=0, use_analytical_noise=False,
-                 n_obs=1, nparallel = 1, include_fourierGaussianBeam= True, ps_dim=2,
+                 n_obs=1, nparallel = 1, include_fourierGaussianBeam= True, ps_dim=2, ps_type="delay",
                  **kwargs):
         """
         A likelihood for EoR physical parameters, based on a Gaussian 2D power spectrum.
@@ -135,6 +135,7 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
         self.n_obs = n_obs
         self.nparallel = nparallel
         self.mean_visibility_fg = None
+        self.ps_type = ps_type
 
         self.use_analytical_noise = use_analytical_noise
         self.include_fourierGaussianBeam = include_fourierGaussianBeam
@@ -326,7 +327,7 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
         if self.ps_dim == 2:
             cov = []
             grid_weights = self.grid_weights
-
+            
             for ii, sig_eta in enumerate(signal_power):
                 x = (1 / grid_weights[ii] * np.diag(sig_eta)**2)
                 x[np.isnan(x)] = 0
@@ -501,7 +502,7 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
         """
         # Grid visibilities only if we're not using "grid_centres"
 
-        if self.baselines_type != "grid_centres":
+        if (self.baselines_type != "grid_centres") & (self.ps_type!="delay"):
             if((self.nparallel==1) or (self.include_fourierGaussianBeam==False)):
                 visgrid, kernel_weights = self.grid_visibilities(visibilities)
             else:
@@ -513,13 +514,104 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
         visgrid = self.frequency_fft(visgrid, self.frequencies, self.ps_dim, taper=signal.blackmanharris, n_obs = self.n_obs)#self.frequency_taper)
 
         # Get 2D power from gridded vis.
-        power2d = self.get_power(visgrid, kernel_weights, ps_dim=self.ps_dim)
+        if self.ps_type=="delay":
+            power2d = self.get_powerDelay(visgrid, ps_dim=self.ps_dim)
+        else:
+            power2d = self.get_power(visgrid, kernel_weights, ps_dim=self.ps_dim)
 
-        # only re-write the regridding kernel weights if we want to simulate things again 
-        if((os.path.exists(self.datafile[0][:-4]+".kernel_weights.npy")==False)):
-            np.save(self.datafile[0][:-4]+".kernel_weights.npy",kernel_weights)
+            # only re-write the regridding kernel weights if we want to simulate things again 
+            if((os.path.exists(self.datafile[0][:-4]+".kernel_weights.npy")==False)):
+                np.save(self.datafile[0][:-4]+".kernel_weights.npy",kernel_weights)
 
         return power2d
+
+    def get_powerDelay(self, all_visibilities, ps_dim=2):
+        """
+        Determine the 2D Delay Spectrum of the observation.
+
+        Parameters
+        ----------
+
+        vis : complex (nbaseline, neta)-array
+            The ungridded visibilities, fourier-transformed along the frequency axis. Units JyHz.
+
+        coords: list of 3 1D arrays.
+            The [u,v,eta] co-ordinates corresponding to the gridded fourier visibilities. u and v in 1/rad, and
+            eta in 1/Hz.
+
+        Returns
+        -------
+        PS : float (n_obs, n_eta, bins)-list
+            The cylindrical averaged (or 2D) Power Spectrum, in unit Jy^2 Hz^2.
+        """
+        logger.info("Calculating the power spectrum")
+        PS = []
+
+        for vis in all_visibilities:
+            # The 3D power spectrum
+            power_3d = np.absolute(vis) ** 2
+
+            u = np.outer(self.baselines[:,0], (self.frequencies / const.c).value)
+            v = np.outer(self.baselines[:,1], (self.frequencies / const.c).value)
+
+            r = np.sqrt(u**2 + v**2)
+
+            if ps_dim == 2:
+
+                power = np.zeros((len(self.frequencies), len(self.u_edges)-1))
+                weights = np.zeros((len(self.frequencies), len(self.u_edges)-1))
+
+                for ff in range(len(self.frequencies)):
+
+                    weights[ff, :] = np.histogram(r[:,ff], self.u_edges)[0]
+                    
+                    power[ff, :] = np.histogram(r[:,ff], self.u_edges, weights = power_3d[:, ff])[0]
+
+
+                power[weights>0] /= (weights[weights>0])
+    
+            elif ps_dim == 1:
+                # need to convert uv and eta to same cosmo unit
+
+                # need to change everything to cosmo unit
+                sq_cosmo, kperp, kpar = obsUnits_to_cosmoUnits(power_3d, self.sky_size, self.frequencies, r, self.eta)
+
+                k = np.sqrt(kperp**2 + kpar**2)
+
+                # find the wedge
+                # remember that sky size is the diameter in lm so need to find radius and multiply by pi to get to radian 
+                fg_wedge = kparallel_wedge(kperp, self.sky_size / 2 * np.pi, np.min(frequencies_to_redshifts(frequencies)))
+
+                # find foregrounds based on the buffer
+                fg_edge = kpar[int(len(self.frequencies)/2) + fg_buffer]
+
+                # and only include this area
+                include_kparBuffer = np.where(np.abs(kpar)>=fg_edge)[0] #& (np.abs(kpar)>=fg_wedge)
+
+                sq_cosmo = sq_cosmo[:, include_kparBuffer]
+                k = k[:, include_kparBuffer]
+                kpar = kpar[include_kparBuffer]
+                fg_wedge = fg_wedge[:, include_kparBuffer]
+
+                # make a 2-D shape containing the values of kpar for each kperp
+                kpar_copy = np.outer(np.ones(np.shape(fg_wedge)[0]), kpar)
+
+                # and only include all regions larger than the wedge
+                include_kparWedge = np.abs(kpar_copy)>fg_wedge #& (np.abs(kpar)>=fg_wedge)
+
+                k = k[include_kparWedge]
+                sq_cosmo = sq_cosmo[include_kparWedge]
+
+                # finally bin them
+                weights = np.histogram(k, self.u_edges)[0]     
+                power = np.histogram(k, self.u_edges, weights = sq_cosmo)[0]
+
+                power[weights>0] /= (weights[weights>0])
+            
+            power[np.isnan(power)] = 0
+            PS.append(power)
+     
+        return PS
 
     def get_power(self, gridded_vis, kernel_weights, ps_dim=2):
         """
@@ -925,7 +1017,7 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
     def eta(self):
         "Grid of positive frequency fourier-modes"
         dnu = self.frequencies[1] - self.frequencies[0]
-        eta = fftfreq(int(len(self.frequencies) / self.n_obs), d=dnu, b=2 * np.pi)
+        eta = powerbox.dft.fftfreq(int(len(self.frequencies) / self.n_obs), d=dnu, b=2 * np.pi)
         if self.ps_dim==2:
             return eta[eta > self.eta_min]
         elif self.ps_dim==1:
@@ -934,30 +1026,41 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
     @cached_property
     def grid_weights(self):
         """The number of uv cells that go into a single u annulus (related to baseline weights)"""
-        if(os.path.exists(self.datafile[0][:-4]+".kernel_weights.npy")):
-            field = np.load(self.datafile[0][:-4]+".kernel_weights.npy")   
+        if self.ps_type=="delay":
+            u = np.outer(self.baselines[:,0], (self.frequencies / const.c).value)
+            v = np.outer(self.baselines[:,1], (self.frequencies / const.c).value)
+
+            r = np.sqrt(u**2 + v**2)
+            weights = np.zeros((len(self.frequencies), len(self.u_edges)-1))
+
+            for ff in range(len(self.frequencies)):
+                weights[ff] = np.histogram(r[:,ff], self.u_edges)[0]   
+            return weights
         else:
-            field = np.ones((len(self.uvgrid),len(self.uvgrid),len(self.frequencies)))
-                
-        if self.ps_dim == 2:
+            if(os.path.exists(self.datafile[0][:-4]+".kernel_weights.npy")):
+                field = np.load(self.datafile[0][:-4]+".kernel_weights.npy")   
+            else:
+                field = np.ones((len(self.uvgrid),len(self.uvgrid),len(self.frequencies)))
+                    
+            if self.ps_dim == 2:
 
-            return angular_average_nd(
-                field = field**2,
-                coords=[self.uvgrid, self.uvgrid, self.eta],
-                bins=self.u_edges, n=self.ps_dim, bin_ave=False,
-                average=False)[0][:,int(len(self.frequencies)/2):]
+                return angular_average_nd(
+                    field = field**2,
+                    coords=[self.uvgrid, self.uvgrid, self.eta],
+                    bins=self.u_edges, n=self.ps_dim, bin_ave=False,
+                    average=False)[0][:,int(len(self.frequencies)/2):]
 
-        elif self.ps_dim == 1:
-            zmid = 1420e6/ np.mean(self.frequencies) -1
+            elif self.ps_dim == 1:
+                zmid = 1420e6/ np.mean(self.frequencies) -1
 
-            return angular_average_nd(
-                field= field**2,
-                coords=[k_perpendicular(self.uvgrid, zmid).value,k_perpendicular(self.uvgrid, zmid).value, k_parallel(self.eta, zmid).value],
-                bins=self.u_edges, bin_ave=False,
-                average=False)[0]
+                return angular_average_nd(
+                    field= field**2,
+                    coords=[k_perpendicular(self.uvgrid, zmid).value,k_perpendicular(self.uvgrid, zmid).value, k_parallel(self.eta, zmid).value],
+                    bins=self.u_edges, bin_ave=False,
+                    average=False)[0]
 
     @staticmethod
-    def frequency_fft(vis, freq, dim, taper=np.ones_like, n_obs =1):
+    def frequency_fft(vis, frequencies, dim, taper=np.ones_like, n_obs =1):
         """
         Fourier-transform a gridded visibility along the frequency axis.
 
@@ -966,7 +1069,7 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
         vis : complex (ncells, ncells, nfreq)-array
             The gridded visibilities.
 
-        freq : (nfreq)-array
+        frequencies : (nfreq)-array
             The linearly-spaced frequencies of the observation.
 
         taper : callable, optional
@@ -984,16 +1087,21 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
         eta : (nfreq/2)-array
             The eta-coordinates, without negative values.
         """
-        ft = []
-        W = (freq.max() - freq.min()) / n_obs
-        L = int(len(freq) / n_obs)
+        all_fts = []
+
+        W = (frequencies.max() - frequencies.min()) / n_obs
+        L = int(len(frequencies) / n_obs)
         
         for ii in range(n_obs):
-            x = fft(vis[:,:,ii*L:(ii+1)*L] * taper(L), W, axes=(2,), a=0, b=2 * np.pi)[0]
+            if len(np.shape(vis))==2:
+                ft = np.fft.fftshift(np.fft.fft(vis[:,ii*L:(ii+1)*L] * taper(L), axis=-1), axes=-1) * np.diff(frequencies)[0]
+            else:
+                ft = powerbox.dft.fft(vis[:,:,ii*L:(ii+1)*L] * taper(L), W, axes=(2,), a=0, b=2 * np.pi)[0]
         
-            ft.append(x)
+            all_fts.append(ft)
             
-        ft = np.array(ft)
+        ft = np.array(all_fts)
+
         return ft
 
 def _produce_mock(self, params, i):
