@@ -349,8 +349,9 @@ class CoreInstrumental(CoreBase):
 
     def __init__(self, *, antenna_posfile, freq_min, freq_max, nfreq, tile_diameter=4.0, max_bl_length=None,
                  noise_integration_time=120, Tsys=240, effective_collecting_area=21.0, n_obs = 1, nparallel = 1,
-                 sky_extent=3, n_cells=300, include_beam=True, beam_type=None, padding_size = 3, tot_daily_obs_time = 6,
-                 beam_synthesis_time = 600, declination=-26., RA_pointing = 0, include_earth_rotation_synthesis = True,
+                 sky_extent=3, n_cells=300, include_beam=True, beam_type=None, padding_size = None, tot_daily_obs_time = 6,
+                 beam_synthesis_time = 600, declination=-26., RA_pointing = 0, include_earth_rotation_synthesis = False,
+                 same_foreground = True,
                  **kwargs):
         """
         Parameters
@@ -427,6 +428,9 @@ class CoreInstrumental(CoreBase):
         self.n_obs = n_obs
         self.nparallel = nparallel
         self.effective_collecting_area = effective_collecting_area * un.m ** 2
+
+        self.same_foreground = same_foreground
+        self.default_foreground = None
 
         self.tot_daily_obs_time = tot_daily_obs_time
         self.beam_synthesis_time = beam_synthesis_time
@@ -524,7 +528,6 @@ class CoreInstrumental(CoreBase):
         """
         Transform the raw brightness temperature of a simulated lightcone into the box structure required in this class.
         """
-        #print(self.lightcone_core.global_params["ZPRIME_STEP_FACTOR"])
         
         redshifts = py21Wapper._get_lightcone_redshifts(self.lightcone_core.cosmo_params, 
                                  self.lightcone_core.max_redshift, 
@@ -588,21 +591,38 @@ class CoreInstrumental(CoreBase):
         if lightcone is not None:
             box = self.prepare_sky_lightcone(lightcone.brightness_temp)
 
-            ctx.remove("lightcone")
-            del lightcone # to save memory
+            ctx.remove("lightcone") # to save memory
+            
         else:
             # this allows us to only simulate foreground with no cosmic signal
             box = 0
         
         # Now get foreground visibilities and add them in
         foregrounds = ctx.get("foregrounds", [])
-
+        allForegroundsJy = 0
+        
         # Get the total brightness
         for fg, cls in zip(foregrounds, self.foreground_cores):
+            foreground_sky = self.prepare_sky_foreground(fg, cls)
+
             if fg.unit == "mK":
-                box += self.prepare_sky_foreground(fg, cls) * mK_to_Jy_per_sr(self.instrumental_frequencies)
-            else: # should be in Jy
-                box += self.prepare_sky_foreground(fg, cls)
+                foreground_sky *= mK_to_Jy_per_sr(self.instrumental_frequencies)
+            
+            box += foreground_sky
+            allForegroundsJy += foreground_sky
+
+        if self.same_foreground == True:
+            # first set this as default foreground for the first run
+            if self.default_foreground is None:
+                logger.info("Because same_foreground=True, setting the first foreground as default")
+                self.default_foreground = allForegroundsJy
+                
+            else:
+                # and only add this foreground only if there is a lightcone i.e. not running fg only
+                if lightcone is not None:
+                    logger.info("Adding the default foreground to lightcone")
+                    box += self.default_foreground
+                    del lightcone # to save memory
 
         if (np.max(box)==np.min(box)): #both EoR signal and foregrounds are zero
             vis = np.zeros((len(self.baselines), len(self.instrumental_frequencies)), dtype=np.complex128)
@@ -614,7 +634,6 @@ class CoreInstrumental(CoreBase):
             vis = self.add_instrument(box)
 
         ctx.add("visibilities", vis)
-        np.save("data/trueparams-160MHz_vis.npy", vis)
         
         # This isn't strictly necessary
         ctx.add("baselines_type", self.antenna_posfile)
@@ -665,12 +684,22 @@ class CoreInstrumental(CoreBase):
             if self.beam_type=="Gaussian":
                 lightcone *= self.gaussian_beam(self.instrumental_frequencies)
 
+            elif self.beam_type=="OSKAR":
+                # find the beam in the data directory.
+                data_path = path.join(path.dirname(__file__), 'data')
+                beam = fits.getdata(data_path+"/test_beam.fits", ext=0)[0]
+
+                lightcone *= self.interpolate_frequencies(np.moveaxis(beam, 0, -1), np.array([150,170,190])*1e6, self.instrumental_frequencies)
+                logger.info("Beam type overwritten to ideal")
+                # and then rename the beam type to ideal for next runs
+                self.beam_type = "Ideal"
+
             elif self.beam_type=="Ideal":
                 # find the beam in the data directory.
                 data_path = path.join(path.dirname(__file__), 'data')
                 beam = fits.getdata(data_path+"/ideal_beam.fits", ext=0)[0]
 
-                lightcone *= interpolate_frequencies(np.moveaxis(beam, 0, -1), np.array([150,170,190])*1e6, self.instrumental_frequencies)
+                lightcone *= self.interpolate_frequencies(np.moveaxis(beam, 0, -1), np.array([150,170,190])*1e6, self.instrumental_frequencies)
 
             elif self.beam_type==None:
                 warnings.warn("Beam type is None! Proceeding with no beam attenuation")
@@ -714,7 +743,7 @@ class CoreInstrumental(CoreBase):
                     data_path = path.join(path.dirname(__file__), 'data')
                     beam = fits.getdata(data_path+"/ideal_beam.fits", ext=0)[ii]
 
-                    lightcone_new = lightcone * interpolate_frequencies(np.moveaxis(beam, 0, -1), np.array([150,170,190])*1e6, self.instrumental_frequencies)
+                    lightcone_new = lightcone * self.interpolate_frequencies(np.moveaxis(beam, 0, -1), np.array([150,170,190])*1e6, self.instrumental_frequencies)
 
                 elif self.beam_type==None:
                     warnings.warn("Beam type is None! Proceeding with no beam attenuation")

@@ -14,9 +14,9 @@ from fg_instrumental.likelihood import LikelihoodInstrumental2D
 
 # ============== SET THESE VARIABLES ========================
 
-model_name = "TestNoisePSandDiffuseFG-SKA-150MHz"
+model_name = "testing"
 
-DEBUG = int(os.environ.get("DEBUG", 2))
+DEBUG = int(os.environ.get("DEBUG", 0))
 LOGLEVEL = 1
 
 # for the lightcone module
@@ -27,12 +27,12 @@ antenna_posfile = 'ska_low_v5' #'mwa_phase2'#
 freq_min = 150.0 # in MHz
 freq_max = 160.0 # in MHz
 n_obs = 1 # this will be the number of observation between the min and max frequency (multi-redshift)
-sky_size = 0.5  # in lm
+sky_size = 0.35  # in lm
 u_min = 10
 noise_integration_time = 3600000  # 1000 hours of observation time
 tile_diameter = 35 
 max_bl_length = 500 #250 if DEBUG else 300
-Tsys = 240
+Tsys = 0 #240
 effective_collecting_area = 300.0
 
 tot_daily_obs_time = 6 # in hours
@@ -44,20 +44,25 @@ S_max = 50e-3
 # MCMC OPTIONS
 params = dict(  # Parameter dict as described above.
     HII_EFF_FACTOR=[30.0, 10.0, 50.0, 3.0],
-    ION_Tvir_MIN=[4.7, 2, 8, 0.1],
+    # ION_Tvir_MIN=[4.7, 2, 8, 0.1],
 )
 
 # ----- Options that differ between DEBUG levels --------
-HII_DIM = [250, 125, 80][DEBUG]
-DIM = 3 * HII_DIM
-BOX_LEN = 3 * HII_DIM
+HII_DIM = [128, 75, 30][DEBUG]
+DIM = 4 * HII_DIM
+BOX_LEN = 4 * HII_DIM
 
 # Instrument Options
-nfreq = 10 * n_obs  #100 if DEBUG else 100 * n_obs
+nfreq = 100 if DEBUG else 100 * n_obs
 n_cells = 256 #  900 if DEBUG else 800
 
 # Likelihood options
 n_ubins = 30
+nrealisations = [500, 10, 2][DEBUG]
+nthreads = [8, 4, 1][DEBUG]
+
+walkersRatio = [8, 4, 2][DEBUG]  # The number of walkers will be walkersRatio*nparams
+sampleIterations = [300, 20, 5][DEBUG]
 
 # ============== END OF USER-SETTABLE STUFF =================
 
@@ -91,7 +96,7 @@ core_eor = CoreLightConeModule(
     ),
     astro_params={
         "HII_EFF_FACTOR":params["HII_EFF_FACTOR"][0], 
-        "ION_Tvir_MIN":params["ION_Tvir_MIN"][0]
+        # "ION_Tvir_MIN":params["ION_Tvir_MIN"][0]
     },
     z_step_factor=z_step_factor,  # How large the steps between evaluated redshifts are (log).
     regenerate=False,
@@ -101,7 +106,9 @@ core_eor = CoreLightConeModule(
         "2DPS": _store_2dps
     },    
     change_seed_every_iter=False,
-    initial_conditions_seed=42
+    initial_conditions_seed=42,
+    cache_mcmc=False,
+    cache_dir="/data/21cmfast-data/."
 )
 
 class CustomCoreInstrument(CoreInstrumental):
@@ -116,10 +123,10 @@ class CustomCoreInstrument(CoreInstrumental):
                          **kwargs)
 
 class CustomLikelihood(LikelihoodInstrumental2D):
-    def __init__(self, n_ubins=n_ubins, uv_max=None, nrealisations=[500, 100, 2][DEBUG],
+    def __init__(self, n_ubins=n_ubins, uv_max=None, nrealisations = nrealisations,
                  **kwargs):
         super().__init__(n_ubins=n_ubins, uv_max=uv_max, u_min=u_min, n_obs = n_obs, nparallel = 1,
-                         simulate=True, nthreads=[10, 3, 1][DEBUG], nrealisations = nrealisations, ps_dim=2, include_fourierGaussianBeam=False,
+                         simulate=False, nthreads=nthreads, nrealisations = nrealisations, ps_dim=2, include_fourierGaussianBeam=False,
                          **kwargs)
 
     def store(self, model, storage):
@@ -132,15 +139,15 @@ def run_mcmc(*args, model_name, params=params, **kwargs):
         datadir='data',  # Directory for all outputs
         model_name=model_name,  # Filename of main chain output
         params=params,
-        walkersRatio=[10, 3, 2][DEBUG],  # The number of walkers will be walkersRatio*nparams
+        walkersRatio=walkersRatio,  # The number of walkers will be walkersRatio*nparams
         burninIterations=0,  # Number of iterations to save as burnin. Recommended to leave as zero.
-        sampleIterations=[100, 50, 2][DEBUG],  # Number of iterations to sample, per walker.
-        threadCount=[10, 3, 1][DEBUG],  # Number of processes to use in MCMC (best as a factor of walkersRatio)
+        sampleIterations=sampleIterations,  # Number of iterations to sample, per walker.
+        threadCount=nthreads,  # Number of processes to use in MCMC (best as a factor of walkersRatio)
         continue_sampling=CONTINUE,  # Whether to contine sampling from previous run *up to* sampleIterations.
         **kwargs
     )
 
-core_instr = CustomCoreInstrument(antenna_posfile = antenna_posfile, Tsys = Tsys, effective_collecting_area = effective_collecting_area, include_beam=True, beam_type="Gaussian")
+core_instr = CustomCoreInstrument(antenna_posfile = antenna_posfile, Tsys = Tsys, effective_collecting_area = effective_collecting_area, include_beam=True, beam_type="OSKAR")
 
 # Add foregrounds core
 core_fg_ps = CorePointSourceForegrounds(S_min = S_min, S_max= S_max)

@@ -134,7 +134,7 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
         self.ps_dim = ps_dim
         self.n_obs = n_obs
         self.nparallel = nparallel
-        self.mean_visibility_fg = None
+
         self.ps_type = ps_type
 
         self.use_analytical_noise = use_analytical_noise
@@ -166,10 +166,6 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
         """
         self.baselines_type = ctx.get("baselines_type")
         visibilities = ctx.get("visibilities")
-
-        # Add mean visibility of foreground to the power
-        if self.mean_visibility_fg is not None:
-            visibilities += self.mean_visibility_fg
             
         p_signal = self.compute_power(visibilities)
 
@@ -215,7 +211,7 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
         if self.foreground_cores and not any([fg._updating for fg in self.foreground_cores]):
             if not self.use_analytical_noise:
                 mean, covariance = self.numerical_covariance(ctx, 
-                    nrealisations=self.nrealisations, nthreads=self._nthreads
+                    nrealisations = self.nrealisations, nthreads=self._nthreads
                 )
             elif self.nrealisations!=0:
                 #Still getting mean numerically for now...
@@ -391,18 +387,6 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
                    
         pool.close()
         pool.join()
-        
-        vis_mean = np.zeros((len(self.baselines), len(self.frequencies)), dtype=np.complex128)
-        visgrid = np.array(visgrid)
-        
-        for ii in range(nrealisations):
-            vis_mean += visgrid[ii]
-            
-        vis_mean = vis_mean / nrealisations
-        
-        self.meanVis_exist = True
-
-        self.mean_visibility_fg = vis_mean
 
         return mean, cov
 
