@@ -3,7 +3,7 @@ from astropy import constants as const
 from astropy import units as un
 from astropy.cosmology import Planck15 as cosmo
 
-def mK_to_Jy_per_sr(z):#, cellsize, distances):
+def mK_to_Jy_per_sr(nu):#, cellsize, distances):
     """
     Conversion factor to convert a pixel of mK to Jy/sr (and vice versa via division)
     Taken from http://w.astro.berkeley.edu/~wright/school_2012.pdf
@@ -17,8 +17,6 @@ def mK_to_Jy_per_sr(z):#, cellsize, distances):
     conversion_factor : float or array
         The conversion factor(s) (per frequency) which convert temperature in Kelvin to flux density in Jy.
     """
-
-    nu = redshifts_to_frequencies(z)
 
     wvlngth = const.c / (nu / un.s)
 

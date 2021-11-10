@@ -615,13 +615,17 @@ class CoreInstrumental(CoreBase):
             # first set this as default foreground for the first run
             if self.default_foreground is None:
                 logger.info("Because same_foreground=True, setting the first foreground as default")
+                
                 self.default_foreground = allForegroundsJy
+                np.savez("data/defaultForegrounds", allForegroundsJy=allForegroundsJy)
                 
             else:
                 # and only add this foreground only if there is a lightcone i.e. not running fg only
                 if lightcone is not None:
                     logger.info("Adding the default foreground to lightcone")
-                    box += self.default_foreground
+                    allForegroundsJy = np.load("data/defaultForegrounds.npz")["allForegroundsJy"]
+                    
+                    box += allForegroundsJy
                     del lightcone # to save memory
 
         if (np.max(box)==np.min(box)): #both EoR signal and foregrounds are zero
@@ -685,6 +689,7 @@ class CoreInstrumental(CoreBase):
                 lightcone *= self.gaussian_beam(self.instrumental_frequencies)
 
             elif self.beam_type=="OSKAR":
+                logger.info("Using the perturbed OSKAR beam")
                 # find the beam in the data directory.
                 data_path = path.join(path.dirname(__file__), 'data')
                 beam = fits.getdata(data_path+"/test_beam.fits", ext=0)[0]
@@ -696,6 +701,8 @@ class CoreInstrumental(CoreBase):
 
             elif self.beam_type=="Ideal":
                 # find the beam in the data directory.
+                logger.info("Using ideal beam")
+
                 data_path = path.join(path.dirname(__file__), 'data')
                 beam = fits.getdata(data_path+"/ideal_beam.fits", ext=0)[0]
 
