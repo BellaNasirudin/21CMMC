@@ -351,7 +351,7 @@ class CoreInstrumental(CoreBase):
                  noise_integration_time=120, Tsys=240, effective_collecting_area=21.0, n_obs = 1, nparallel = 1,
                  sky_extent=3, n_cells=300, include_beam=True, beam_type=None, padding_size = None, tot_daily_obs_time = 6,
                  beam_synthesis_time = 600, declination=-26., RA_pointing = 0, include_earth_rotation_synthesis = False,
-                 same_foreground = True,
+                 same_foreground = False, simulate_foreground=True,
                  **kwargs):
         """
         Parameters
@@ -431,6 +431,7 @@ class CoreInstrumental(CoreBase):
 
         self.same_foreground = same_foreground
         self.default_foreground = None
+        self.simulate_foreground = simulate_foreground
 
         self.tot_daily_obs_time = tot_daily_obs_time
         self.beam_synthesis_time = beam_synthesis_time
@@ -535,22 +536,24 @@ class CoreInstrumental(CoreBase):
                                  self.lightcone_core.user_params,
                                  self.lightcone_core.io_options["z_step_factor"])
 
-
         frequencies = 1420.0e6 / (1 + redshifts)
-
+        
         if not np.all(frequencies == self.instrumental_frequencies):
-            box = cw.interpolate_map_frequencies(box, frequencies, self.instrumental_frequencies)
+            box = self.interpolate_frequencies(box, frequencies, self.instrumental_frequencies) #cw.interpolate_map_frequencies(box, frequencies, self.instrumental_frequencies)
 
         box_size = self.lightcone_core.user_params.BOX_LEN / self.rad_to_cmpc(
             np.mean(redshifts), self.lightcone_core.cosmo_params.cosmo)
-
+        
         # If the original simulation does not match the sky grid defined here, stitch and coarsen it
         if box_size != self.sky_size or len(box) != self.n_cells:
-            box = self.tile_and_coarsen(box, box_size)
+            box_coords = np.linspace(-self.lightcone_core.user_params.BOX_LEN / 2., self.lightcone_core.user_params.BOX_LEN / 2., np.shape(box)[0]) / self.rad_to_cmpc(
+            np.mean(redshifts), self.lightcone_core.cosmo_params.cosmo)
 
+            box = self.tile_and_coarsen(box, box_size, box_coords, tile_only=False)#True)
+        
         # Convert to Jy/sr
-        box *= mK_to_Jy_per_sr(self.instrumental_frequencies)
-
+        box *= mK_to_Jy_per_sr(self.instrumental_frequencies).value
+        
         return box
 
     @profile
@@ -585,11 +588,11 @@ class CoreInstrumental(CoreBase):
         Generate a set of realistic visibilities (i.e. the output we expect from an interferometer).
         """
         # Get the basic signal lightcone out of context
-        lightcone = ctx.get("lightcone")
+        lightcone = np.load("data/lightcone.npz")["lightcone"] #ctx.get("lightcone")
 
         # Compute visibilities from EoR simulation
         if lightcone is not None:
-            box = self.prepare_sky_lightcone(lightcone.brightness_temp)
+            box = self.prepare_sky_lightcone(lightcone)#.brightness_temp)
 
             ctx.remove("lightcone") # to save memory
             
@@ -599,31 +602,43 @@ class CoreInstrumental(CoreBase):
         
         # Now get foreground visibilities and add them in
         foregrounds = ctx.get("foregrounds", [])
-        allForegroundsJy = 0
-        
-        # Get the total brightness
-        for fg, cls in zip(foregrounds, self.foreground_cores):
-            foreground_sky = self.prepare_sky_foreground(fg, cls)
 
-            if fg.unit == "mK":
-                foreground_sky *= mK_to_Jy_per_sr(self.instrumental_frequencies)
+        if self.simulate_foreground == False:
+            logger.info("Because simulate_foreground == False, reading existing data and setting it as default")
+
+            allForegroundsJy = np.load("data/defaultForegrounds_new128.npz")["allForegroundsJy"]
+            box += allForegroundsJy
+            del lightcone # to save memory
+            lightcone = None
+
+            self.default_foreground = allForegroundsJy
+        else:
+            logger.info("Because simulate_foreground == True, simulating new foreground realization")   
+            allForegroundsJy = 0
             
-            box += foreground_sky
-            allForegroundsJy += foreground_sky
+            # Get the total brightness
+            for fg, cls in zip(foregrounds, self.foreground_cores):
+                foreground_sky = self.prepare_sky_foreground(fg, cls)
 
+                if fg.unit == "mK":
+                    foreground_sky *= mK_to_Jy_per_sr(self.instrumental_frequencies).value
+                
+                box += foreground_sky
+                allForegroundsJy += foreground_sky
+        
         if self.same_foreground == True:
             # first set this as default foreground for the first run
             if self.default_foreground is None:
                 logger.info("Because same_foreground=True, setting the first foreground as default")
                 
                 self.default_foreground = allForegroundsJy
-                np.savez("data/defaultForegrounds", allForegroundsJy=allForegroundsJy)
+                np.savez("data/defaultForegrounds_new128", allForegroundsJy=allForegroundsJy)
                 
             else:
                 # and only add this foreground only if there is a lightcone i.e. not running fg only
                 if lightcone is not None:
                     logger.info("Adding the default foreground to lightcone")
-                    allForegroundsJy = np.load("data/defaultForegrounds.npz")["allForegroundsJy"]
+                    allForegroundsJy = np.load("data/defaultForegrounds_new128.npz")["allForegroundsJy"]
                     
                     box += allForegroundsJy
                     del lightcone # to save memory
@@ -710,7 +725,7 @@ class CoreInstrumental(CoreBase):
 
             elif self.beam_type==None:
                 warnings.warn("Beam type is None! Proceeding with no beam attenuation")
-
+        
         if self.padding_size is not None:
             lightcone = self.padding_image(lightcone, self.sky_size, self.padding_size * self.sky_size)
             lightcone, uv = self.image_to_uv(lightcone, self.padding_size * self.sky_size)
@@ -1178,12 +1193,63 @@ class CoreInstrumental(CoreBase):
             return visibilities
 
     @profile
-    def tile_and_coarsen(self, sim, sim_size):
+    def tile_and_coarsen(self, sim, sim_size, sim_coords, tile_only=False):
         """"""
         logger.info("Tiling and coarsening boxes...")
-        sim = cw.stitch_and_coarsen_sky(sim, sim_size, self.sky_size, self.n_cells)
 
-        return sim
+        # sim = cw.stitch_and_coarsen_sky(sim, sim_size, self.sky_size, self.n_cells)
+
+        num = int(self.sky_size / sim_size)
+
+        ## first need to interpolate and make sure things are linearly spaced in lm!!
+        new_lm = np.linspace(-sim_size / 2., sim_size / 2., np.shape(sim)[0])
+        sim = self.interpolate_spatial(sim, sim_coords, new_lm, self.instrumental_frequencies)
+        
+        sim_new = sim
+        for ii in range(1,num):
+            sim_new = np.append(sim_new, sim, axis=0)
+
+        sim_final = sim_new
+
+        for ii in range(1,num):
+            sim_final = np.append(sim_final, sim_new, axis=1)
+        
+        if tile_only == True:
+            return sim_final
+        else:
+
+            original_lm = np.linspace(-self.sky_size / 2., self.sky_size / 2., np.shape(sim_final)[0])
+            new_lm = np.linspace(-self.sky_size / 2., self.sky_size / 2., self.n_cells)
+
+            sim = self.interpolate_spatial(sim_final, original_lm, new_lm, self.instrumental_frequencies)
+        
+            return sim
+
+    @staticmethod
+    def interpolate_spatial(data, original_lm, new_lm, freqs):
+        # generate the interpolation function
+        func = RegularGridInterpolator([original_lm, original_lm, freqs], data)#, bounds_error=False, fill_value=0)
+
+        # Create a meshgrid to interpolate the points
+        XY, YX, LINFREQS = np.meshgrid(new_lm, new_lm, freqs, indexing='ij')
+
+        # Flatten the arrays so the can be put into pts array
+        XY = XY.flatten()
+        YX = YX.flatten()
+        LINFREQS = LINFREQS.flatten()
+
+        # Create the points to interpolate
+        numpts = XY.size
+        pts = np.zeros([numpts, 3])
+        pts[:, 0], pts[:, 1], pts[:, 2] = XY, YX, LINFREQS
+
+        # Interpolate the points
+        interpData = func(pts)
+
+        # Reshape the data
+        interpData = interpData.reshape(len(new_lm), len(new_lm), len(freqs))
+
+        return interpData
 
     @staticmethod
     def interpolate_frequencies(data, freqs, linFreqs, uv_range=100):
