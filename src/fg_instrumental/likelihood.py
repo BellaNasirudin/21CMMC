@@ -51,8 +51,8 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
     required_cores = [CoreInstrumental]
 
     def __init__(self, n_uv=999, n_ubins=30, uv_max=None, u_min=None, u_max=None, frequency_taper=np.blackman, 
-                 nrealisations=100, nthreads=1, model_uncertainty=0.15, eta_min=0, use_analytical_noise=False,
-                 n_obs=1, nparallel = 1, include_fourierGaussianBeam= True, ps_dim=2, ps_type="delay",
+                 nrealisations=100, nthreads=1, model_uncertainty=0.15, eta_min=0,
+                 n_obs=1, nparallel = 1, include_fourierGaussianBeam= False, ps_dim=2, ps_type="delay",
                  **kwargs):
         """
         A likelihood for EoR physical parameters, based on a Gaussian 2D power spectrum.
@@ -97,9 +97,6 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
         eta_min : float, optional
             Minimum eta value to consider in the model. This will be applied at every u value.
 
-        use_analytical_noise : bool, optional
-            Whether to use analytical estimate of noise properties (eg. mean and covariance).
-
         n_obs : int, optional
             Whether to combine observation from different frequency bands.
 
@@ -137,7 +134,6 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
 
         self.ps_type = ps_type
 
-        self.use_analytical_noise = use_analytical_noise
         self.include_fourierGaussianBeam = include_fourierGaussianBeam
 
     def setup(self):
@@ -166,7 +162,7 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
         """
         self.baselines_type = ctx.get("baselines_type")
         visibilities = ctx.get("visibilities")
-            
+        
         p_signal = self.compute_power(visibilities)
 
         # Remember that the results of "simulate" can be used in two places: (i) the computeLikelihood method, and (ii)
@@ -209,17 +205,9 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
         # Only save the mean/cov if we have foregrounds, and they don't update every iteration (otherwise, get them
         # every iter).
         if self.foreground_cores and not any([fg._updating for fg in self.foreground_cores]):
-            if not self.use_analytical_noise:
-                mean, covariance = self.numerical_covariance(ctx, 
-                    nrealisations = self.nrealisations, nthreads=self._nthreads
-                )
-            elif self.nrealisations!=0:
-                #Still getting mean numerically for now...
-                mean = self.numerical_covariance(ctx,nrealisations=self.nrealisations, nthreads=self._nthreads)[0]
-
-                covariance = self.analytical_covariance(self.u, self.eta,
-                                                        np.median(self.frequencies),
-                                                        self.frequencies.max() - self.frequencies.min())
+            if self.nrealisations!=0:
+                
+                mean, covariance = self.numerical_covariance(ctx,nrealisations=self.nrealisations, nthreads=self._nthreads)
 
                 thermal_covariance = self.get_thermal_covariance()
                 covariance = [x + y for x, y in zip(covariance, thermal_covariance)]
@@ -382,90 +370,13 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
                 cov = np.var(np.array(power)[:,ii,:] , axis=0)
         
         # Cleanup the memory
-#        for i in range(len(power)-1,-1,-1):
-#            del power[i]
+       for i in range(len(power)-1,-1,-1):
+           del power[i]
                    
         pool.close()
         pool.join()
 
         return mean, cov
-
-    @staticmethod
-    def analytical_covariance(uv, eta, nu_mid, bwidth, S_min=1e-1, S_max=1.0, alpha=4100., beta=1.59, D=4.0, gamma=0.8,
-                              f0=150e6):
-        """
-        from Cath's derivation: https://www.overleaf.com/3815868784cbgxmpzpphxm
-        
-        assumes:
-            1. Gaussian beam
-            2. Blackman-Harris taper
-            3. S_max is 1 Jy
-            
-        Parameters
-        ----------
-        uv    : array
-            The range of u,v's in Fourier space (sr^-1).
-        eta   : array
-            The range of eta in Fourier space (Hz^-1).
-        nu_mid: float
-            The central band frequency (Hz).
-        bwidth: float
-            The bandwidth (Hz).
-        S_min : float, optional
-            The minimum flux density of point sources in the simulation (Jy).
-        S_max : float, optional
-            The maximum flux density of point sources in the simulation, representing the 'peeling limit' (Jy)
-        alpha : float, optional
-            The normalisation coefficient of the source counts (sr^-1 Jy^-1).
-        beta : float, optional
-            The power-law index of source counts.
-        D     : float, optional
-            The physical diameter of the tiles, in metres.
-        gamma : float, optional
-            The power-law index of the spectral energy distribution of sources (assumed universal).
-        f0    : float, optional
-            The reference frequency, at which the other parameters are defined, in Hz.
-        
-        Returns
-        -------
-        cov   : (n_eta, n_eta)-array in a n_uv list
-            The analytical covariance of the power spectrum over uv.
-        
-        """
-        sigma = bwidth / 7
-
-        cov = []
-
-        for ii in range(len(uv)):
-
-            x = lambda u: u * const.c.value / nu_mid
-
-            # we only need the covariance of u with itself, so x1=x2
-            C = 2 * sigma ** 2 * (2 * x(uv[ii]) ** 2) / const.c.value ** 2
-
-            std_dev = const.c.value * eta / D
-
-            A = 1 / std_dev ** 2 + C
-
-            # all combination of eta
-            cov_uv = np.zeros((len(eta), len(eta)))
-
-            for jj in range(len(eta)):
-                avg_S2 = quad(lambda S: S ** 2 * alpha * (S ** 2 * (eta[jj] * f0) ** (gamma)) ** (-beta) * alpha / (
-                        3 + beta) * S ** (3 + beta), S_min, S_max)[0]
-
-                B = 4 * sigma ** 2 * (x(uv[ii]) * (eta + eta[jj])) / const.c.value
-
-                cov_eta = avg_S2 * np.sqrt(np.pi / (4 * A)) * np.exp(
-                    -2 * sigma ** 2 * (eta ** 2 + eta[jj] ** 2)) * np.exp(B ** 2 / (4 * A)) * (
-                                  erf((B + 2 * A) / (np.sqrt(2) * A)) - erf((B - 2 * A) / (np.sqrt(2) * A)))
-
-                cov_uv[jj, :] = cov_eta
-                cov_uv[:, jj] = cov_eta
-
-            cov.append(cov_uv)
-
-        return cov
 
     def compute_power(self, visibilities):
         """
@@ -493,7 +404,7 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
                 visgrid, kernel_weights = self.grid_visibilities_parallel(visibilities)
         else:
             visgrid = visibilities
-          
+        
         # Transform frequency axis
         visgrid = self.frequency_fft(visgrid, self.frequencies, self.ps_dim, taper=signal.blackmanharris, n_obs = self.n_obs)#self.frequency_taper)
 
@@ -528,7 +439,7 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
         PS : float (n_obs, n_eta, bins)-list
             The cylindrical averaged (or 2D) Power Spectrum, in unit Jy^2 Hz^2.
         """
-        logger.info("Calculating the power spectrum")
+        logger.info("Calculating the DELAY spectrum")
         PS = []
 
         for vis in all_visibilities:
@@ -539,7 +450,7 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
             v = np.outer(self.baselines[:,1], (self.frequencies / const.c).value)
 
             r = np.sqrt(u**2 + v**2)
-
+            
             if ps_dim == 2:
 
                 power = np.zeros((len(self.frequencies), len(self.u_edges)-1))
