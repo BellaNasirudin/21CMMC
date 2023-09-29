@@ -31,7 +31,8 @@ def solve_block_matrix(S, x):
                 # Then we just ignore those values of u (or kperp) and keep going.
                 # TODO: this might not be a great idea.
 
-                warnings.warn("solve didn't work for index %s" % i)
+                # warnings.warn("solve didn't work for index %s" % i)
+                continue
 
     bits = np.array(bits)
     return bits, inds
@@ -54,4 +55,4 @@ def lognormpdf(x, mu, cov):
     for i, (s, e) in enumerate(zip(sol, err[inds])):
         numerator += s.dot(e)
     
-    return -0.5 * numerator#(norm_coeff + numerator)
+    return -0.5 * numerator #(norm_coeff + numerator)

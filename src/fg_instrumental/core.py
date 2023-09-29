@@ -20,11 +20,23 @@ from scipy.integrate import quad
 from scipy.interpolate import RegularGridInterpolator, RectBivariateSpline
 import multiprocessing as mp
 import ctypes
-from astropy.io import fits
 from fg_instrumental.unitConversion import mK_to_Jy_per_sr
-import py21cmfast.wrapper as py21Wapper
+import py21cmfast.wrapper as py21Wrapper
+from astropy.cosmology import Planck18
+import os
+os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/cluster/shared/software/libs/cuda/11.2"
+# os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".95"
+os.environ["JAX_PLATFORM_NAME"] = "cpu"
+import jax
+# jax.config.update("jax_platform_name", "cpu")
+jax.config.update("jax_enable_x64", True)
+import spax
 
 logger = logging.getLogger("21cmFAST")
+
+# from astropy.utils import iers
+# iers.conf.auto_download = False
 
 import warnings
 
@@ -62,7 +74,7 @@ class ForegroundsBase(CoreBase):
     All subclasses of :class:`CoreBase` receive the argument `store`, whose documentation is in the `21CMMC` docs.
     """
 
-    def __init__(self, *, frequencies=None, sky_size=None, n_cells=None, model_params={}, **kwargs):
+    def __init__(self, *, frequencies=None, sky_size=None, n_cells=None, padding_size=None, model_params={}, **kwargs):
         """
         Initialise the ForegroundsBase object.
 
@@ -92,6 +104,7 @@ class ForegroundsBase(CoreBase):
         self.model_params = model_params
         self._sky_size = sky_size
         self._n_cells = n_cells
+        self._padding_size = padding_size
 
         # These save the default values. These will be *overwritten* in setup() if a LightCone is loaded
         self._frequencies = frequencies
@@ -126,6 +139,7 @@ class ForegroundsBase(CoreBase):
 
         The sky will be assumed to stretch from -sky_size/2 to sky_size/2.
         """
+        
         if self._sky_size is None:
             if hasattr(self, "_instrumental_core"):
                 self._sky_size = self._instrumental_core.sky_size
@@ -134,6 +148,17 @@ class ForegroundsBase(CoreBase):
                 raise ValueError("As no instrumental core is loaded, sky_size needs to be specified.")
 
         return self._sky_size
+
+    @property
+    def padding_size(self):
+        if self._padding_size is None:
+            if hasattr(self, "_instrumental_core"):
+                if self._instrumental_core.padding_size == None:
+                    self._padding_size = 1
+                else:
+                    self._padding_size = self._instrumental_core.padding_size
+
+        return self._padding_size
 
     @property
     def n_cells(self):
@@ -243,9 +268,12 @@ class CorePointSourceForegrounds(ForegroundsBase):
         """
         logger.info("Populating point sources... ")
 
+        new_ncells = int(self.n_cells * self.padding_size)
+        new_skysize = (self.sky_size * self.padding_size)
+
         # Find the mean number of sources
         n_bar = quad(lambda x: alpha * x ** (-beta), S_min, S_max)[
-                    0] * self.sky_size ** 2  # Need to multiply by sky size in steradian
+                    0] *  new_skysize ** 2  # Need to multiply by sky size in steradian
 
         # Generate the number of sources following poisson distribution
         n_sources = np.random.poisson(n_bar)
@@ -257,17 +285,17 @@ class CorePointSourceForegrounds(ForegroundsBase):
         S_0 = ((S_max ** (1 - beta) - S_min ** (1 - beta)) * np.random.uniform(size=n_sources) + S_min ** (
                 1 - beta)) ** (1 / (1 - beta))
 
-        pos = np.rint(np.random.uniform(0, self.n_cells ** 2 - 1, size=n_sources)).astype(int)
+        pos = np.rint(np.random.uniform(0, new_ncells ** 2 - 1, size=n_sources)).astype(int)
 
         # Grid the fluxes at reference frequency, f0
-        sky = np.bincount(pos, weights=S_0, minlength=self.n_cells ** 2)
+        sky = np.bincount(pos, weights=S_0, minlength= new_ncells ** 2)
         
         # Find the fluxes at different frequencies based on spectral index
-        sky = np.outer(sky, (self.frequencies / f0) ** (-gamma)).reshape((self.n_cells, self.n_cells, len(self.frequencies)))
+        sky = np.outer(sky, (self.frequencies / f0) ** (-gamma)).reshape((new_ncells, new_ncells, len(self.frequencies)))
         
         # Divide by cell area to get in Jy/sr (proportional to K)
         sky /= self.cell_area
-
+        
         return UnitArray(sky, unit= 'JyperSr')
 
 
@@ -349,9 +377,9 @@ class CoreInstrumental(CoreBase):
 
     def __init__(self, *, antenna_posfile, freq_min, freq_max, nfreq, tile_diameter=4.0, max_bl_length=None,
                  noise_integration_time=120, Tsys=240, effective_collecting_area=21.0, n_obs = 1, nparallel = 1,
-                 sky_extent=3, n_cells=300, include_beam=True, beam_type=None, padding_size = None, tot_daily_obs_time = 6,
+                 sky_extent=3, n_cells=300, include_beam=False, beam_type=None, padding_size = None, tot_daily_obs_time = 6,
                  beam_synthesis_time = 600, declination=-26., RA_pointing = 0, include_earth_rotation_synthesis = False,
-                 same_foreground = False, simulate_foreground=True,
+                 same_foreground = False, simulate_foreground=True, sample_gain = False, sample_beam = False, diffuse_realization = 0, eor_model=70,
                  **kwargs):
         """
         Parameters
@@ -417,7 +445,7 @@ class CoreInstrumental(CoreBase):
         super().__init__(**kwargs)
 
         self.antenna_posfile = antenna_posfile
-        self.instrumental_frequencies = np.linspace(freq_min * 1e6, freq_max * 1e6, nfreq)
+        self.instrumental_frequencies = np.arange(freq_min * 1e6, freq_max * 1e6, (freq_max - freq_min) / nfreq *1e6)
         self.tile_diameter = tile_diameter * un.m
         self.max_bl_length = max_bl_length
         self.noise_integration_time = noise_integration_time
@@ -433,12 +461,17 @@ class CoreInstrumental(CoreBase):
         self.default_foreground = None
         self.simulate_foreground = simulate_foreground
 
+        self.sample_gain = sample_gain
+        self.sample_beam = sample_beam
+
         self.tot_daily_obs_time = tot_daily_obs_time
         self.beam_synthesis_time = beam_synthesis_time
         self.include_earth_rotation_synthesis = include_earth_rotation_synthesis
         self.RA_pointing = RA_pointing
         #not sure if this should be attributed to self at this point
         declination = declination
+        self.diffuse_realization = diffuse_realization
+        self.eor_model = eor_model
 
 
         if self.effective_collecting_area > self.tile_diameter ** 2:
@@ -476,9 +509,9 @@ class CoreInstrumental(CoreBase):
                 self._baselines = self.get_baselines_rotation(uv, self.tot_daily_obs_time, self.beam_synthesis_time, declination, self.RA_pointing) * un.m
 
             if self.max_bl_length:
-                self._baselines = self._baselines[
-                    self._baselines[:, 0].value ** 2 + self._baselines[:, 1].value ** 2 <= self.max_bl_length ** 2]
-            
+                mask = self._baselines[:, 0].value ** 2 + self._baselines[:, 1].value ** 2 <= self.max_bl_length ** 2
+                self._baselines = self._baselines[mask]
+                # np.savez("gain_indices_maxbl%i_%is" %(self.max_bl_length, self.beam_synthesis_time), ind = mask)        
 
     @cached_property
     def lightcone_core(self):
@@ -509,7 +542,7 @@ class CoreInstrumental(CoreBase):
     def cell_area(self):
         return self.cell_size ** 2
 
-    def rad_to_cmpc(self, redshift, cosmo):
+    def rad_to_cmpc(self, redshift, cosmo=None):
         """
         Conversion factor between Mpc and radians for small angles.
 
@@ -522,7 +555,7 @@ class CoreInstrumental(CoreBase):
         factor : float
             Conversion factor which gives the size in radians of a 1 Mpc object at given redshift.
         """
-        return cosmo.comoving_transverse_distance(redshift).value
+        return Planck18.comoving_transverse_distance(redshift).value
 
 
     def prepare_sky_lightcone(self, box):
@@ -530,31 +563,56 @@ class CoreInstrumental(CoreBase):
         Transform the raw brightness temperature of a simulated lightcone into the box structure required in this class.
         """
         
-        redshifts = py21Wapper._get_lightcone_redshifts(self.lightcone_core.cosmo_params, 
+        redshifts = py21Wrapper._get_lightcone_redshifts(self.lightcone_core.cosmo_params, 
                                  self.lightcone_core.max_redshift, 
                                  self.lightcone_core.redshift[0],
                                  self.lightcone_core.user_params,
                                  self.lightcone_core.io_options["z_step_factor"])
 
-        frequencies = 1420.0e6 / (1 + redshifts)
-        
+        frequencies = 1420.0e6 / (1 + redshifts) #np.arange(106e6, 196.9e6, 100000)#
+
         if not np.all(frequencies == self.instrumental_frequencies):
             box = self.interpolate_frequencies(box, frequencies, self.instrumental_frequencies) #cw.interpolate_map_frequencies(box, frequencies, self.instrumental_frequencies)
-
-        box_size = self.lightcone_core.user_params.BOX_LEN / self.rad_to_cmpc(
-            np.mean(redshifts), self.lightcone_core.cosmo_params.cosmo)
         
+        # new_box = np.zeros((self.n_cells, self.n_cells, len(self.instrumental_frequencies)))
+        # # pad box and change to mK
+        # new_box[8:,8:] = box * 1000.
+        
+        box_size = self.lightcone_core.user_params.BOX_LEN / self.rad_to_cmpc(
+            np.max(redshifts), self.lightcone_core.cosmo_params.cosmo)
+        print(box_size, self.rad_to_cmpc(np.max(redshifts), self.lightcone_core.cosmo_params.cosmo))
+
         # If the original simulation does not match the sky grid defined here, stitch and coarsen it
-        if box_size != self.sky_size or len(box) != self.n_cells:
+        if round(box_size, 4) < round(self.sky_size, 4) or len(box) != self.n_cells:
+            logger.info("Lightcone is too small. Padding to fill the FoV")
+            print(box_size, self.sky_size, len(box), self.n_cells)
+            raise SystemExit
             box_coords = np.linspace(-self.lightcone_core.user_params.BOX_LEN / 2., self.lightcone_core.user_params.BOX_LEN / 2., np.shape(box)[0]) / self.rad_to_cmpc(
             np.mean(redshifts), self.lightcone_core.cosmo_params.cosmo)
 
-            box = self.tile_and_coarsen(box, box_size, box_coords, tile_only=False)#True)
+            new_box = self.tile_and_coarsen(box, box_size, box_coords, tile_only=False)
+
+        elif round(box_size, 4) >= round(self.sky_size, 4) : # if boxsize is bigger than the sky_size, need to cut and regrid
+            logger.info("Lightcone is too big. Cutting the lightcone into smaller FoV")
+            new_box = np.zeros((self.n_cells, self.n_cells, len(self.instrumental_frequencies)))
+            len_freq = int(len(self.instrumental_frequencies)/self.n_obs)
+
+            boxsize_mpc = self.lightcone_core.user_params.BOX_LEN
+            instrumental_z = 1420.0e6 / self.instrumental_frequencies -1
+
+            box_lm = np.linspace(- self.sky_size/2, self.sky_size/2, self.n_cells)
+            for ii in range(self.n_obs):
+                # get box coord in rad for each chunk
+                box_coords = np.linspace(- boxsize_mpc/ 2., boxsize_mpc / 2., np.shape(box)[0]) / self.rad_to_cmpc(np.mean(instrumental_z[ii*len_freq:(ii+1)*len_freq]))
+
+                new_box[:, :, ii*len_freq:(ii+1)*len_freq] = self.interpolate_spatial(box[:, :, ii*len_freq:(ii+1)*len_freq], box_coords, box_lm, 
+                    np.linspace(0, len_freq, len_freq)) 
         
         # Convert to Jy/sr
-        box *= mK_to_Jy_per_sr(self.instrumental_frequencies).value
-        
-        return box
+        new_box *= mK_to_Jy_per_sr(self.instrumental_frequencies).value
+        # np.savez("lc_full_30pc", lc = new_box, z = instrumental_z)
+        # raise SystemExit
+        return new_box, redshifts
 
     @profile
     def prepare_sky_foreground(self, box, cls):
@@ -578,7 +636,7 @@ class CoreInstrumental(CoreBase):
         """
 
         vis = ctx.get("visibilities")
-
+        
         # Add thermal noise using the mean beam area
         vis = self.add_thermal_noise(vis)
         ctx.add("visibilities", vis)
@@ -587,84 +645,153 @@ class CoreInstrumental(CoreBase):
         """
         Generate a set of realistic visibilities (i.e. the output we expect from an interferometer).
         """
+        box = 0
+
         # Get the basic signal lightcone out of context
-        lightcone = np.load("data/lightcone.npz")["lightcone"] #ctx.get("lightcone")
+        lightcone = ctx.get("lightcone") # None #fits.getdata("/home/anasirudin/fg_challenge/data/My_EoR_H21cm_new.fits", ext=0) # 
 
         # Compute visibilities from EoR simulation
         if lightcone is not None:
-            box = self.prepare_sky_lightcone(lightcone)#.brightness_temp)
-
-            ctx.remove("lightcone") # to save memory
+            box, redshifts = self.prepare_sky_lightcone(lightcone.brightness_temp)
+            ctx.add("redshifts", redshifts)
+            # ctx.remove("lightcone") # to save memory
             
         else:
-            # this allows us to only simulate foreground with no cosmic signal
-            box = 0
-        
-        # Now get foreground visibilities and add them in
-        foregrounds = ctx.get("foregrounds", [])
+            if self.eor_model ==0:
+                box = 0
+            else:
+                # this allows us to only simulate foreground with no cosmic signal
+                logger.info("Reading lightcone data")
+                box = np.load("lc_full_%ipc.npz" %self.eor_model)["lc"] # 0
 
-        if self.simulate_foreground == False:
-            logger.info("Because simulate_foreground == False, reading existing data and setting it as default")
+                if np.shape(box)[-1]>len(self.instrumental_frequencies):
+                    box = box[:,:,-len(self.instrumental_frequencies):]
 
-            allForegroundsJy = np.load("data/defaultForegrounds_new128.npz")["allForegroundsJy"]
-            box += allForegroundsJy
-            del lightcone # to save memory
-            lightcone = None
+        if self.diffuse_realization !=0:
+            if self.simulate_foreground == False:
 
-            self.default_foreground = allForegroundsJy
-        else:
-            logger.info("Because simulate_foreground == True, simulating new foreground realization")   
-            allForegroundsJy = 0
-            
-            # Get the total brightness
-            for fg, cls in zip(foregrounds, self.foreground_cores):
-                foreground_sky = self.prepare_sky_foreground(fg, cls)
-
-                if fg.unit == "mK":
-                    foreground_sky *= mK_to_Jy_per_sr(self.instrumental_frequencies).value
+                # box += np.load("lc_full_10pc.npz")["lc"]
                 
-                box += foreground_sky
-                allForegroundsJy += foreground_sky
-        
+                logger.info("Because simulate_foreground == False, reading existing data and setting it as default")
+
+                file_dir = "/home/anasirudin/fg_challenge/data/"
+
+                allForegroundsJy = fits.getdata(file_dir + "merged%i.fits" %self.diffuse_realization, ext=0, memmap=False).T[:,:, -len(self.instrumental_frequencies):]
+
+                # ## this is for calculating SKA stuff
+                # allForegroundsJy = np.load(file_dir + "new_image_115_170MHz.npz")["image"] / np.pi * np.deg2rad(0.0553607952110976) * np.deg2rad(0.04114777022790) / (4 * np.log(2))
+                
+                allForegroundsJy[allForegroundsJy<0] = 0
+                
+                box += allForegroundsJy
+                del allForegroundsJy #lightcone # to save memory
+                # lightcone = None
+
+                # Now get foreground and add them in
+                foregrounds = ctx.get("foregrounds", [])
+
+                # Get the total brightness
+                for fg, cls in zip(foregrounds, self.foreground_cores):
+                    foreground_sky = self.prepare_sky_foreground(fg, cls)
+
+                    if fg.unit == "mK":
+                        foreground_sky *= mK_to_Jy_per_sr(self.instrumental_frequencies).value
+                    
+                    box += foreground_sky
+
+                # self.default_foreground = allForegroundsJy
+            else:
+                logger.info("Because simulate_foreground == True, simulating new foreground realization")   
+                allForegroundsJy = 0
+                
+                # Now get foreground and add them in
+                foregrounds = ctx.get("foregrounds", [])
+                
+                # Get the total brightness
+                for fg, cls in zip(foregrounds, self.foreground_cores):
+                    foreground_sky = self.prepare_sky_foreground(fg, cls)
+
+                    if fg.unit == "mK":
+                        foreground_sky *= mK_to_Jy_per_sr(self.instrumental_frequencies).value
+                    
+                    box += foreground_sky
+                    allForegroundsJy += foreground_sky
+
+            if (self.padding_size is not None):    
+                if (np.shape(box)[0]!= self.padding_size * self.n_cells):
+                    box = self.padding_image(box, np.shape(box)[0], self.padding_size * self.n_cells)
+        '''
         if self.same_foreground == True:
             # first set this as default foreground for the first run
             if self.default_foreground is None:
                 logger.info("Because same_foreground=True, setting the first foreground as default")
                 
                 self.default_foreground = allForegroundsJy
-                np.savez("data/defaultForegrounds_new128", allForegroundsJy=allForegroundsJy)
+                np.savez("data/defaultForegrounds_residual", allForegroundsJy=allForegroundsJy)
+
+                logger.info("Setting simulate_foreground == False so we do not run foregrounds again")
+                self.simulate_foreground = False
                 
             else:
                 # and only add this foreground only if there is a lightcone i.e. not running fg only
                 if lightcone is not None:
                     logger.info("Adding the default foreground to lightcone")
-                    allForegroundsJy = np.load("data/defaultForegrounds_new128.npz")["allForegroundsJy"]
+                    allForegroundsJy = np.load("data/defaultForegrounds_residual.npz")["allForegroundsJy"]
                     
                     box += allForegroundsJy
                     del lightcone # to save memory
+        '''
 
+        # # Now get foreground and add them in
+        # foregrounds = ctx.get("foregrounds", [])
+
+        # ## adding unresolved foregrounds
+        # box += foregrounds[0]
+        
+        if self.diffuse_realization!=0:
+            logger.info("Adding gleam sources")
+            # add gleam stuff as well
+            if (self.padding_size is not None):
+                gleam_fg = np.load("/home/anasirudin/fg_challenge/data/fg_sky150_181_196MHz_11520_new.npz")["sky"][:,:,-len(self.instrumental_frequencies):]#
+            else:
+                gleam_fg = np.load("/home/anasirudin/fg_challenge/data/fg_sky150_106_196MHz_512_new.npz")["sky"][:,:,-len(self.instrumental_frequencies):]
+                #gleam180_sky301-106_136MHz.npz
+
+            gleam_fg[gleam_fg<0] = 0
+            box += gleam_fg
+
+            # clear some memory
+            # del foregrounds
+            del gleam_fg
+
+        ## calculating visibilities
         if (np.max(box)==np.min(box)): #both EoR signal and foregrounds are zero
             vis = np.zeros((len(self.baselines), len(self.instrumental_frequencies)), dtype=np.complex128)
 
-        elif self.include_earth_rotation_synthesis == True:
-            vis = self.add_instrument_rotation(box)
+        vis = self.add_instrument(box)
 
-        else:
-            vis = self.add_instrument(box)
-
-        ctx.add("visibilities", vis)
+        if self.beam_type == "OSKAR":
+            vis = self.add_calibration(vis)
         
+        # if self.diffuse_realization !=0:
+        #     if self.beam_synthesis_time == 600:
+        #         logger.info("Adding gleam vis with beam attenuation")
+        #         vis += np.load("data/visibilities_10m_newgleam_only.npz")["vis"] #/scratch/anasirudin/visibilities_10m_newgleam_only.npz
+        #     elif self.beam_synthesis_time == 300:
+        #         logger.info("Adding gleam vis with beam attenuation")
+        #         vis += np.load("/scratch/anasirudin/visibilities_5m_newgleam.npz")["vis"] #/scratch/anasirudin/visibilities_10m_newgleam_only.npz
+
+        ctx.add("visibilities", vis) #
+        
+        # if self.diffuse_realization ==0 & self.include_earth_rotation_synthesis == True:
+        #     np.savez("/scratch/anasirudin/visibilities_%im_newgleam" %(self.beam_synthesis_time/60), vis =vis, bl=self.baselines)
+        #     logger.info("Saving file and exiting")
+            # raise SystemExit
         # This isn't strictly necessary
+        ctx.add("sample_gain", self.sample_gain)
         ctx.add("baselines_type", self.antenna_posfile)
 
-    @staticmethod
-    def pad_with(vector, pad_width, iaxis, kwargs):
-        pad_value = kwargs.get('padder', 0)
-        vector[:pad_width[0]] = pad_value
-        vector[-pad_width[1]:] = pad_value
-        return vector
-
-    def padding_image(self, image_cube, sky_size, big_sky_size):
+    def padding_image(self, image_cube, sky_ncells, big_sky_ncells, padder = 0):
         """
         Generate a spatial padding in image cube.
 
@@ -673,26 +800,31 @@ class CoreInstrumental(CoreBase):
         image_cube : (ncells, ncells, nfreq)-array
             The frequency-dependent sky brightness (in arbitrary units)
 
-        sky_size : float
-            The size of the box in radians.
+        sky_ncells : float
+            The number of cells of the box.
 
-        big_sky_size : float
-            The size of the padded box in radians.
+        big_sky_ncells : float
+            The number of cells of the padded box.
 
         Returns
         -------
-        sky : (ncells, ncells, nfreq)-array
+        sky : (big_sky_ncells, big_sky_ncells, nfreq)-array
             The sky padded with zeros along the l,m plane.
         """
-        sky = []
+        logger.info("Padding image")
 
-        N_pad = int((big_sky_size - sky_size) / (2.0 * sky_size) * np.shape(image_cube)[0])
+        N_pad = int((big_sky_ncells - sky_ncells) / 2)
+        print("padding with %i cells" %N_pad)
 
-        for jj in range(np.shape(image_cube)[-1]):
-            sky.append(np.pad(image_cube[:,:,jj], N_pad, self.pad_with))
+        big_sky_ncells = int(big_sky_ncells)
+        if padder==0:
+            sky = np.zeros((big_sky_ncells, big_sky_ncells, np.shape(image_cube)[-1]))
+        else:
+            sky = np.ones((big_sky_ncells, big_sky_ncells, np.shape(image_cube)[-1]))
+            sky *= padder
 
-        sky = np.array(sky).T
-
+        sky[N_pad:-N_pad, N_pad:-N_pad] = image_cube
+        
         return sky
 
     @profile
@@ -709,30 +841,90 @@ class CoreInstrumental(CoreBase):
                 data_path = path.join(path.dirname(__file__), 'data')
                 beam = fits.getdata(data_path+"/test_beam.fits", ext=0)[0]
 
-                lightcone *= self.interpolate_frequencies(np.moveaxis(beam, 0, -1), np.array([150,170,190])*1e6, self.instrumental_frequencies)
-                logger.info("Beam type overwritten to ideal")
-                # and then rename the beam type to ideal for next runs
-                self.beam_type = "Ideal"
+                # interpolate beam so we have higher resolution
+                beam = np.moveaxis(beam, 0, -1)
+                beam = self.interpolate_spatial(beam, np.linspace(-10, 10, 256), np.linspace(-10, 10, self.n_cells), np.array([150,170,190])*1e6)
+                
+                lightcone *= self.interpolate_frequencies(beam, np.array([150,170,190])*1e6, self.instrumental_frequencies)
 
             elif self.beam_type=="Ideal":
-                # find the beam in the data directory.
                 logger.info("Using ideal beam")
 
+                # find the ideal beam in the data directory and load
                 data_path = path.join(path.dirname(__file__), 'data')
                 beam = fits.getdata(data_path+"/ideal_beam.fits", ext=0)[0]
 
-                lightcone *= self.interpolate_frequencies(np.moveaxis(beam, 0, -1), np.array([150,170,190])*1e6, self.instrumental_frequencies)
+                if self.sample_beam == True:
+                    logger.info("Adding sampled perturbation using  with 20 components")
+                    # then sample the components
+                    params = [1, 78, 1, "tanh", "poly"]
+                    filename = "../../SPax/data/fitBeamKPCA_Ncomponents20.hdf5"
+                    kpca = spax.KernelPCA(
+                    N = 20,
+                    α = params[2], 
+                    kernel = params[3], kernel_kwargs = {"gamma": params[0]}, 
+                    inverse_kernel = params[4], inverse_kernel_kwargs = {"gamma": params[1]},
+                    )
+
+                    kpca.load(filename)
+
+                    sampled_data = kpca.inverse_transform(kpca.sample(1)).T.reshape((3, 256, 256))
+                    beam += sampled_data
+
+                # interpolate beam so we have higher resolution
+                beam = np.moveaxis(beam, 0, -1)
+                beam = self.interpolate_spatial(beam, np.linspace(-10, 10, 256), np.linspace(-10, 10, self.n_cells), np.array([150,170,190])*1e6)
+                lightcone *= self.interpolate_frequencies(beam, np.array([150,170,190])*1e6, self.instrumental_frequencies)    
+
+            elif self.beam_type=="SKADC":
+                logger.info("Using SKADC beam")
+                pix_res = 0.004444444444445
+                if self.padding_size is not None:
+                    beam = fits.getdata("/home/anasirudin/fg_challenge/data/station_beam.fits", ext=0)[-len(self.instrumental_frequencies):].T
+                else:
+                    beam = fits.getdata("/home/anasirudin/fg_challenge/data/station_beam.fits", ext=0)[-len(self.instrumental_frequencies):,380:-380,380:-380].T
+
+                if np.shape(lightcone)[0]!=np.shape(beam)[0]:
+                    logger.info("Interpolating beam to match the simulation resolution")
+                    size = np.shape(beam)[0] * pix_res
+                    
+                    lm = np.linspace(-size/2, size/2, np.shape(beam)[0])
+                    
+                    if self.padding_size is not None:
+                        lm_new = np.linspace(-size/2, size/2, int(size/0.015625))
+                    else:
+                        lm_new = np.linspace(-4, 4, 512)#
+                    # interpolate so that they have same resolution
+                    beam = self.interpolate_spatial(beam, lm, lm_new , self.instrumental_frequencies)
+                    # np.savez("beam", beam = beam[:,:,0])
+                    # raise SystemExit                    
+                    if self.padding_size is not None:
+                        # if we go over 4 degree radius, set as 1e-3
+                        # print("Padding")
+                        # print(np.max(lm_new), np.min(lm_new))
+                        # l, m = np.meshgrid(lm_new, lm_new)
+                        # beam[l**2 + m**2 > 5.5**2] = 1e-3
+                        # np.savez("beam_new", beam = beam[:,:,0])
+                        # raise SystemExit
+                        beam = self.padding_image(beam, np.shape(beam)[0], np.shape(lightcone)[0] , padder = 1e-3)
+                        # np.savez("beam", beam = beam[:,:,0])
+                        # raise SystemExit
+
+                lightcone *= beam
+
+                # free some memory
+                del beam
 
             elif self.beam_type==None:
                 warnings.warn("Beam type is None! Proceeding with no beam attenuation")
         
         if self.padding_size is not None:
-            lightcone = self.padding_image(lightcone, self.sky_size, self.padding_size * self.sky_size)
+            # lightcone = self.padding_image(lightcone, self.sky_size, self.padding_size * self.sky_size)
             lightcone, uv = self.image_to_uv(lightcone, self.padding_size * self.sky_size)
         else:
             # Fourier transform image plane to UV plane.
             lightcone, uv = self.image_to_uv(lightcone, self.sky_size)
-        
+
         # Fourier Transform over the (u,v) dimension and baselines sampling
         if self.antenna_posfile != "grid_centres":
             if(self.nparallel==1):
@@ -746,53 +938,57 @@ class CoreInstrumental(CoreBase):
         return visibilities
 
     @profile
-    def add_instrument_rotation(self, lightcone):
+    def add_calibration(self, visibilities):
 
-        all_visibilities = np.zeros((len(self.baselines), len(self.instrumental_frequencies)), dtype=np.complex128)
+        logger.info("Correcting visibilities using gain solutions")
 
-        L = int(len(self.baselines) / self.number_of_snapshots)
+        gain = np.load("all_gain.npy")
+        
+        gain_I = (gain[0] + gain[1]) / 2 # assuming I = (X + YY) / 2
+        print(gain_I.shape)
+        ############################################################################################################
+        # logger.info("Sampling the gains using PCA")
+        # gain_I = np.zeros((128, 512), dtype= np.complex128)
+        # file_extension = ["real", "imaginary"]
 
-        for ii in range(self.number_of_snapshots):
+        # for ii in range(len(file_extension)):
+        #     ## loading pca trained stuff
+        #     pca = spax.PCA_m(
+        #     N = 5,
+        #     devices = jax.devices("gpu"),
+        #     )
+        #     filename = "../../SPax/data/fitGainPCA_Ncomponents5_Nruns50_" + file_extension[ii] + ".hdf5"
 
-            # Find beam attenuation
-            if self.include_beam is True:
+        #     pca.load(filename)
 
-                if self.beam_type=="Gaussian":
-                    lightcone_new = lightcone * self.gaussian_beam(self.instrumental_frequencies)
+        #     sampled_data = pca.sample(512)
 
-                elif self.beam_type=="Ideal":
-                    # find the beam in the data directory.
-                    data_path = path.join(path.dirname(__file__), 'data')
-                    beam = fits.getdata(data_path+"/ideal_beam.fits", ext=0)[ii]
+        #     if ii ==0:
+        #         gain_I.real =+ sampled_data
+        #     else:
+        #         gain_I.imag =+ sampled_data
+        #############################################################################################################
+        ind = np.tril_indices(len(gain_I[0]), k=-1)
 
-                    lightcone_new = lightcone * self.interpolate_frequencies(np.moveaxis(beam, 0, -1), np.array([150,170,190])*1e6, self.instrumental_frequencies)
+        gain_bl = np.zeros((int(np.shape(gain_I)[1] * (np.shape(gain_I)[1] -1) / 2), len(self.instrumental_frequencies)), dtype=np.complex128)
+        print(gain_bl.shape)
+        for ff in range(len(self.instrumental_frequencies)):
+            gain_bl[:, ff] = np.outer(gain_I[ff], gain_I[ff])[ind]
 
-                elif self.beam_type==None:
-                    warnings.warn("Beam type is None! Proceeding with no beam attenuation")
-                    lightcone_new = lightcone
-            else:
-                lightcone_new = lightcone
+        # include only gains for baselines within max_bl_length
+        ind_maxbl = np.load("gain_indices_maxbl%i_%is.npz" %(self.max_bl_length, self.beam_synthesis_time))["ind"]
+
+        gain_maxbl = np.zeros((len(np.where(ind_maxbl ==1)[0]), len(self.instrumental_frequencies)), dtype=np.complex128)
+
+        for ff in range(len(self.instrumental_frequencies)):
+            gain_maxbl[:, ff] = gain_bl[:, ff][ind_maxbl]
             
-            # Fourier Transform over the (l,m) dimension 
-            if self.padding_size is not None:
-                lightcone_new = self.padding_image(lightcone_new, self.sky_size, self.padding_size * self.sky_size)
+        if self.sample_gain == True:
+            logger.info("Beam type now overwritten to ideal for sampling/model purposes")
+            # and then rename the beam type to ideal for next runs
+            self.beam_type = "Ideal"
 
-                lightcone_new, uv = self.image_to_uv(lightcone_new, self.padding_size * self.sky_size)
-            else:
-                # Fourier transform image plane to UV plane.
-                lightcone_new, uv = self.image_to_uv(lightcone_new, self.sky_size)
-
-            # baselines sampling
-            if self.antenna_posfile != "grid_centres":
-                if(self.nparallel==1):
-                    all_visibilities[ii*L:(ii+1)*L] = self.sample_onto_baselines(lightcone_new, uv, self.baselines[ii*L:(ii+1)*L], self.instrumental_frequencies)
-                else:
-                    all_visibilitie[ii*L:(ii+1)*L] = self.sample_onto_baselines_parallel(lightcone_new, uv, self.baselines[ii*L:(ii+1)*L], self.instrumental_frequencies)
-            else:
-                all_visibilities = lightcone
-                self.baselines = uv[1]
-      
-        return all_visibilities
+        return visibilities / gain_maxbl
 
     @cached_property
     def baselines(self):
@@ -844,14 +1040,17 @@ class CoreInstrumental(CoreBase):
         beam_area : (nfrequencies)-array
             The beam area of the sky (in sr).
         """
-        sky_coords = np.linspace(-self.sky_size / 2, self.sky_size / 2, self.n_cells)
+        if self.padding_size is None:
+            sky_coords = np.linspace(-self.sky_size / 2, self.sky_size / 2, self.n_cells)
+        else:
+            sky_coords = np.linspace(-self.sky_size * self.padding_size / 2, self.sky_size * self.padding_size / 2, int(self.n_cells * self.padding_size))
         
         # Create a meshgrid for the beam attenuation on sky array
         L, M = np.meshgrid(np.sin(sky_coords), np.sin(sky_coords), indexing='ij')
 
         attenuation = np.exp(
             np.outer(-(L ** 2 + M ** 2), 1. / (self.sigma(frequencies) ** 2)).reshape(
-                (self.n_cells, self.n_cells, len(frequencies))))
+                (int(self.n_cells * self.padding_size), int(self.n_cells * self.padding_size), len(frequencies))))
         
         attenuation[attenuation<min_attenuation] = 0
         
@@ -880,7 +1079,7 @@ class CoreInstrumental(CoreBase):
             The u and v co-ordinates of the uvsky, respectively. Units are inverse of L.
         """
         logger.info("Converting to UV space...")
-
+        
         ft, uv_scale = fft(sky, L, axes=(0, 1), a=0, b=2 * np.pi)
         
         return ft, uv_scale
@@ -909,7 +1108,7 @@ class CoreInstrumental(CoreBase):
 
         frequencies = frequencies / un.s
         vis = np.zeros((len(baselines), len(frequencies)), dtype=np.complex128)
-
+        
         logger.info("Sampling the data onto baselines...")
 
         for i, ff in enumerate(frequencies):
@@ -973,8 +1172,8 @@ class CoreInstrumental(CoreBase):
             arr[:, 0] = (baselines[:, 0] / lamb).value
             arr[:, 1] = (baselines[:, 1] / lamb).value
             
-            real = uvplane.real[:, :, i+nfreqoffset]
-            imag = uvplane.imag[:, :, i+nfreqoffset]
+            real = uvplane.real[:, :, i]#+nfreqoffset]
+            imag = uvplane.imag[:, :, i]#+nfreqoffset]
             
             f_real = RectBivariateSpline(uv[0], uv[1], real)
             f_imag = RectBivariateSpline(uv[0], uv[1], imag)
@@ -994,20 +1193,16 @@ class CoreInstrumental(CoreBase):
         offset = 0
         nfreqstart = np.zeros(self.nparallel,dtype=int)
         nfreqend = np.zeros(self.nparallel,dtype=int)
-        infreq = np.zeros(self.nparallel,dtype=int)
         for i in range(self.nparallel):
             nfreqstart[i] = offset
             nfreqend[i] = offset + numperthread
-
-            if(i==self.nparallel-1):
-                infreq[i] = nfreq - offset
-            else:
-                infreq[i] = numperthread
-
-            offset+=numperthread
-
+            offset+=numperthread   
         # Set the last process to the number of frequencies
         nfreqend[-1] = nfreq
+
+        print("nfreqstart", nfreqstart)
+        print("nfreqend",nfreqend)
+        print("Num of freq",nfreq) 
         processes = []
         vis_real = []
         vis_imag = []
@@ -1024,7 +1219,7 @@ class CoreInstrumental(CoreBase):
             vis_real.append(vis_buff_real)
             vis_imag.append(vis_buff_imag)
 
-            processes.append(mp.Process(target=self._sample_onto_baselines_buff,args=(ncells,nfreq,nfreqstart[i],uvplane, uv, baselines, frequencies[nfreqstart[i]:nfreqend[i]], vis_buff_real,vis_buff_imag) ))
+            processes.append(mp.Process(target=self._sample_onto_baselines_buff,args=(ncells, nfreq, nfreqstart[i], uvplane[:,:,nfreqstart[i]:nfreqend[i]], uv, baselines, frequencies[nfreqstart[i]:nfreqend[i]], vis_buff_real, vis_buff_imag) ))
 
         for p in processes:
             p.start()
@@ -1033,6 +1228,7 @@ class CoreInstrumental(CoreBase):
             p.join()
 
         for i in range(self.nparallel):
+            
             vis.real[:,nfreqstart[i]:nfreqend[i]] = np.frombuffer(vis_real[i]).reshape(baselines.shape[0],nfreqend[i] - nfreqstart[i])
             vis.imag[:,nfreqstart[i]:nfreqend[i]] = np.frombuffer(vis_imag[i]).reshape(baselines.shape[0],nfreqend[i] - nfreqstart[i])
 
@@ -1068,7 +1264,7 @@ class CoreInstrumental(CoreBase):
     def number_of_snapshots(self):
         return int(self.tot_daily_obs_time * 60 * 60 / self.beam_synthesis_time)
 
-    def get_baselines_rotation(self, pos_file, tot_daily_obs_time = 6, beam_synthesis_time = 600, declination=-26., RA_pointing = 0):
+    def get_baselines_rotation(self, pos_file, tot_daily_obs_time = 6, beam_synthesis_time = 600, declination=-30., RA_pointing = 0):
         """
         From a set of antenna positions, determine the non-autocorrelated baselines with Earth rotation synthesis, assuming
         a flat sky.
@@ -1091,14 +1287,17 @@ class CoreInstrumental(CoreBase):
 
         new_baselines = np.zeros((self.number_of_snapshots*len(pos_file), 2))
 
-        for ii in range(self.number_of_snapshots):
-            new_baselines[ii*len(pos_file):(ii+1)*len(pos_file),:] = self.earth_rotation_synthesis(pos_file, ii, beam_synthesis_time, declination=declination, RA_pointing = RA_pointing)
+        # hour angle in degrees
+        HA = np.linspace(-tot_daily_obs_time/2, tot_daily_obs_time/2, self.number_of_snapshots) * 15
 
+        for ii in range(self.number_of_snapshots):
+            new_baselines[ii*len(pos_file):(ii+1)*len(pos_file),:] = self.earth_rotation_synthesis(pos_file, HA[ii], beam_synthesis_time, declination=declination, RA_pointing = RA_pointing)
+        
         return new_baselines # only return the x,y part
 
     @profile
     @staticmethod
-    def earth_rotation_synthesis(Nbase, slice_num, beam_synthesis_time, declination=-26., RA_pointing = 0):
+    def earth_rotation_synthesis(Nbase, HA, beam_synthesis_time, declination=-30., RA_pointing = 0):
         """
         The rotation of the earth over the observation times makes changes the part of the 
         sky measured by each antenna.
@@ -1125,17 +1324,15 @@ class CoreInstrumental(CoreBase):
             It is the new Nbase calculated for the rotated antenna configurations.
         """
 
-        # change everything in degree to radian because numpy does things in radian
-        deg_to_rad = np.pi / 180.
+        delta = np.deg2rad(declination)
 
-        delta = deg_to_rad * declination
-
-        one_hour = 15.0 * deg_to_rad # the rotation in radian after an hour
+        one_hour = np.deg2rad(15.0) # the rotation in radian after an hour
 
         # multiply by the total observation time and number of slices
         # also offset by the RA pointing
-        HA    =  one_hour * (slice_num - 1) * beam_synthesis_time / (60 * 60) + RA_pointing * 15 * deg_to_rad
+        # HA    =  one_hour * (slice_num - 1) * beam_synthesis_time / (60 * 60) + RA_pointing * np.deg2rad(15)
         
+        HA = np.deg2rad(HA)
         new_Nbase = np.zeros((len(Nbase),2))
         new_Nbase[:,0] = np.sin(HA) * Nbase[:,0] + np.cos(HA) * Nbase[:,1]
         new_Nbase[:,1] = -1.0 * np.sin(delta) * np.cos(HA) * Nbase[:,0] + np.sin(delta) * np.sin(HA) * Nbase[:,1]
@@ -1253,7 +1450,7 @@ class CoreInstrumental(CoreBase):
 
     @staticmethod
     def interpolate_frequencies(data, freqs, linFreqs, uv_range=100):
-
+        
         if (freqs[0] > freqs[-1]):
             freqs = freqs[::-1]
             data = np.flip(data, 2)

@@ -7,14 +7,15 @@ from powerbox.dft import fft
 from powerbox.tools import angular_average_nd
 from py21cmmc.core import CoreLightConeModule
 from py21cmmc.mcmc import run_mcmc as _run_mcmc
+from py21cmmc import analyse
 
 from fg_instrumental.core import CoreInstrumental, CorePointSourceForegrounds, CoreDiffuseForegrounds
 from fg_instrumental.likelihood import LikelihoodInstrumental2D
 
-
+name_extension = str(sys.argv[1])
 # ============== SET THESE VARIABLES ========================
 
-model_name = "testing"
+model_name = "testingEoRFGnoiseTestTrueBeam_" + name_extension
 
 DEBUG = int(os.environ.get("DEBUG", 0))
 LOGLEVEL = 1
@@ -25,26 +26,26 @@ z_step_factor = 1.04
 # for the instrument
 antenna_posfile = 'ska_low_v5' #'mwa_phase2'#
 freq_min = 150.0 # in MHz
-freq_max = 160.0 # in MHz
+freq_max = 165.0 # in MHz
 n_obs = 1 # this will be the number of observation between the min and max frequency (multi-redshift)
-sky_size = 0.35  # in lm
+sky_size = 0.35  # in radian
 u_min = 10
 noise_integration_time = 3600000  # 1000 hours of observation time
 tile_diameter = 35 
 max_bl_length = 500 #250 if DEBUG else 300
-Tsys = 0 #240
-effective_collecting_area = 300.0
+Tsys = 240
+effective_collecting_area = np.pi * (tile_diameter/2)**2
 
 tot_daily_obs_time = 6 # in hours
 beam_synthesis_time = 15 * 60 #3600 #in seconds
 # foreground parameters 
-S_min = 50e-6
+S_min = 50e-9
 S_max = 50e-3
 
 # MCMC OPTIONS
 params = dict(  # Parameter dict as described above.
     HII_EFF_FACTOR=[30.0, 10.0, 50.0, 3.0],
-    # ION_Tvir_MIN=[4.7, 2, 8, 0.1],
+    ION_Tvir_MIN=[4.7, 2, 8, 0.1],
 )
 
 # ----- Options that differ between DEBUG levels --------
@@ -53,15 +54,15 @@ DIM = 4 * HII_DIM
 BOX_LEN = 4 * HII_DIM
 
 # Instrument Options
-nfreq = 100 if DEBUG else 100 * n_obs
+nfreq = 128 #if DEBUG else 100 * n_obs
 n_cells = 256 #  900 if DEBUG else 800
 
 # Likelihood options
 n_ubins = 30
 nrealisations = [500, 10, 2][DEBUG]
-nthreads = [8, 4, 1][DEBUG]
+nthreads = [30, 4, 1][DEBUG]
 
-walkersRatio = [8, 4, 2][DEBUG]  # The number of walkers will be walkersRatio*nparams
+walkersRatio = [15, 4, 2][DEBUG]  # The number of walkers will be walkersRatio*nparams
 sampleIterations = [300, 20, 5][DEBUG]
 
 # ============== END OF USER-SETTABLE STUFF =================
@@ -96,7 +97,7 @@ core_eor = CoreLightConeModule(
     ),
     astro_params={
         "HII_EFF_FACTOR":params["HII_EFF_FACTOR"][0], 
-        # "ION_Tvir_MIN":params["ION_Tvir_MIN"][0]
+        "ION_Tvir_MIN":params["ION_Tvir_MIN"][0]
     },
     z_step_factor=z_step_factor,  # How large the steps between evaluated redshifts are (log).
     regenerate=False,
@@ -108,7 +109,7 @@ core_eor = CoreLightConeModule(
     change_seed_every_iter=False,
     initial_conditions_seed=42,
     cache_mcmc=False,
-    cache_dir="/data/21cmfast-data/."
+    # cache_dir="/data/21cmfast-data/."
 )
 
 class CustomCoreInstrument(CoreInstrumental):
@@ -126,7 +127,7 @@ class CustomLikelihood(LikelihoodInstrumental2D):
     def __init__(self, n_ubins=n_ubins, uv_max=None, nrealisations = nrealisations,
                  **kwargs):
         super().__init__(n_ubins=n_ubins, uv_max=uv_max, u_min=u_min, n_obs = n_obs, nparallel = 1,
-                         simulate=False, nthreads=nthreads, nrealisations = nrealisations, ps_dim=2, include_fourierGaussianBeam=False,
+                         simulate=True, nthreads=nthreads, nrealisations = nrealisations, ps_dim=2, include_fourierGaussianBeam=False,
                          **kwargs)
 
     def store(self, model, storage):
@@ -147,11 +148,11 @@ def run_mcmc(*args, model_name, params=params, **kwargs):
         **kwargs
     )
 
-core_instr = CustomCoreInstrument(antenna_posfile = antenna_posfile, Tsys = Tsys, effective_collecting_area = effective_collecting_area, include_beam=True, beam_type="OSKAR")
+core_instr = CustomCoreInstrument(antenna_posfile = antenna_posfile, Tsys = Tsys, effective_collecting_area = effective_collecting_area, include_beam=True, beam_type=name_extension, same_foreground = True, simulate_foreground=False)
 
 # Add foregrounds core
 core_fg_ps = CorePointSourceForegrounds(S_min = S_min, S_max= S_max)
-core_fg_diff = CoreDiffuseForegrounds()
+# core_fg_diff = CoreDiffuseForegrounds()
 
 likelihood = CustomLikelihood(
     datafile=[f'data/{model_name}.npz'],
@@ -161,7 +162,10 @@ likelihood = CustomLikelihood(
 
 if __name__ == "__main__":
     chain = run_mcmc(
-        [core_eor, core_fg_ps, core_fg_diff, core_instr], likelihood,
+        [core_eor, core_fg_ps, core_instr], likelihood,
         model_name=model_name,             # Filename of main chain output
     )
+    samples = chain.samples
+    analyse.trace_plot(samples, include_lnl=True, start_iter=0, thin=1, colored=False, show_guess=True);
+    analyse.corner_plot(samples, start_iter=0)
 
