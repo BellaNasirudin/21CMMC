@@ -30,10 +30,10 @@ os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/cluster/shared/software/libs
 # os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".95"
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
-import jax
+#import jax
 # jax.config.update("jax_platform_name", "cpu")
-jax.config.update("jax_enable_x64", True)
-import spax
+#jax.config.update("jax_enable_x64", True)
+#import spax
 
 class NoDaemonProcess(multiprocessing.Process):
     @property
