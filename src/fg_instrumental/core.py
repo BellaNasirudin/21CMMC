@@ -302,7 +302,7 @@ class CorePointSourceForegrounds(ForegroundsBase):
 class CoreDiffuseForegrounds(ForegroundsBase):
     """
     A 21CMMC Core MCMC module which adds diffuse foregrounds to the base signal.
-    """
+v    """
 
     def __init__(self, *args, u0=10.0, eta=0.01, rho=-2.7, mean_temp=253e3, kappa=-2.55, distribution = "Gaussian", **kwargs):
         super().__init__(*args,
@@ -586,7 +586,6 @@ class CoreInstrumental(CoreBase):
         if round(box_size, 4) < round(self.sky_size, 4) or len(box) != self.n_cells:
             logger.info("Lightcone is too small. Padding to fill the FoV")
             print(box_size, self.sky_size, len(box), self.n_cells)
-            raise SystemExit
             box_coords = np.linspace(-self.lightcone_core.user_params.BOX_LEN / 2., self.lightcone_core.user_params.BOX_LEN / 2., np.shape(box)[0]) / self.rad_to_cmpc(
             np.mean(redshifts), self.lightcone_core.cosmo_params.cosmo)
 
@@ -697,6 +696,9 @@ class CoreInstrumental(CoreBase):
                     if fg.unit == "mK":
                         foreground_sky *= mK_to_Jy_per_sr(self.instrumental_frequencies).value
                     
+                    if self.padding_size != None:
+                        box = self.padding_image(box, np.shape(box)[0], np.shape(foreground_sky)[0])
+                        
                     box += foreground_sky
 
                 # self.default_foreground = allForegroundsJy
@@ -753,6 +755,7 @@ class CoreInstrumental(CoreBase):
             # add gleam stuff as well
             if (self.padding_size is not None):
                 gleam_fg = np.load("/home/anasirudin/fg_challenge/data/fg_sky150_181_196MHz_11520_new.npz")["sky"][:,:,-len(self.instrumental_frequencies):]#
+
             else:
                 gleam_fg = np.load("/home/anasirudin/fg_challenge/data/fg_sky150_106_196MHz_512_new.npz")["sky"][:,:,-len(self.instrumental_frequencies):]
                 #gleam180_sky301-106_136MHz.npz
@@ -1189,20 +1192,13 @@ class CoreInstrumental(CoreBase):
         #Find out the number of frequencies to process per thread
         nfreq = len(frequencies)
         ncells = uvplane.shape[0]
-        numperthread = int(np.ceil(nfreq/self.nparallel))
-        offset = 0
+        numperthread = nfreq/self.nparallel
         nfreqstart = np.zeros(self.nparallel,dtype=int)
         nfreqend = np.zeros(self.nparallel,dtype=int)
         for i in range(self.nparallel):
-            nfreqstart[i] = offset
-            nfreqend[i] = offset + numperthread
-            offset+=numperthread   
-        # Set the last process to the number of frequencies
-        nfreqend[-1] = nfreq
+            nfreqstart[i] = round(i * numperthread)
+            nfreqend[i] = round((i + 1) * numperthread)
 
-        print("nfreqstart", nfreqstart)
-        print("nfreqend",nfreqend)
-        print("Num of freq",nfreq) 
         processes = []
         vis_real = []
         vis_imag = []

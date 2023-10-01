@@ -176,10 +176,10 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
         # raise SystemExit
         p_signal = self.compute_power(visibilities)
         print(np.shape(p_signal), np.min(p_signal), np.max(p_signal))
-        if self.simulate == True:
-            np.savez("data/skadc_stuff/"+self.datafile[0][:-4], p_signal=p_signal, baselines=self.baselines, frequencies=self.frequencies,
-                         u=self.u, eta=self.eta)
-            raise SystemExit
+        # if self.simulate == True:
+        np.savez("data/skadc_stuff/"+self.datafile[0][:-4], p_signal=p_signal, baselines=self.baselines, frequencies=self.frequencies,
+                     u=self.u, eta=self.eta)
+        raise SystemExit
 
         # Remember that the results of "simulate" can be used in two places: (i) the computeLikelihood method, and (ii)
         # as data saved to file. In case of the latter, it is useful to save extra variables to the dictionary to be
@@ -833,14 +833,12 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
 
         #Find out the number of frequencies to process per thread
         nfreq = len(self.frequencies)
-        numperthread = int(np.ceil(nfreq/self.nparallel))
-        offset = 0
+        numperthread = nfreq/self.nparallel
         nfreqstart = np.zeros(self.nparallel,dtype=int)
         nfreqend = np.zeros(self.nparallel,dtype=int)
         for i in range(self.nparallel):
-            nfreqstart[i] = offset
-            nfreqend[i] = offset + numperthread
-            offset+=numperthread
+            nfreqstart[i] = round(i * numperthread)
+            nfreqend[i] = round((i + 1) * numperthread)
 
          # Set the last process to the number of frequencies
         nfreqend[-1] = nfreq
