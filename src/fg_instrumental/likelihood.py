@@ -172,6 +172,7 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
         self.baselines_type = ctx.get("baselines_type")
         self.sample_gain = ctx.get("sample_gain")
         visibilities = ctx.get("visibilities") 
+        ctx.remove("visibilities")
         print(np.shape(visibilities), np.min(visibilities), np.max(visibilities))
         # raise SystemExit
         p_signal = self.compute_power(visibilities)
@@ -588,8 +589,8 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
                 #     weights=np.sum(kernel_weights**2, axis=2),  # weights,
                 #     bin_ave=False,
                 # )
-                P = np.zeros((num_freq, len(self.u_edges)-1))
-                weights = np.zeros((num_freq, len(self.u_edges)-1))
+                P = np.zeros((num_freq, len(self.u_edges)-1),dtype=np.float32)
+                weights = np.zeros((num_freq, len(self.u_edges)-1),dtype=np.float32)
 
                 for ff in range(num_freq):
 
@@ -668,7 +669,7 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
                    
         return beam, indx_u, indx_v
 
-    def grid_visibilities(self, visibilities, N = 30):
+    def grid_visibilities(self, visibilities, N = 12):
         """
         Grid a set of visibilities from baselines onto a UV grid.
 
@@ -686,7 +687,7 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
         """
         logger.info("Gridding the visibilities")
 
-        visgrid = np.zeros((self.n_uv, self.n_uv, len(self.frequencies)), dtype=np.complex128)
+        visgrid = np.zeros((self.n_uv, self.n_uv, len(self.frequencies)), dtype=np.complex64)
 
         if(os.path.exists(self.datafile[0][:-4]+".kernel_weights.npy")):
             kernel_weights = np.load(self.datafile[0][:-4]+".kernel_weights.npy")
@@ -697,7 +698,7 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
             kernel_weights=None
 
         if kernel_weights is None:
-            weights = np.zeros((self.n_uv, self.n_uv, len(self.frequencies)))
+            weights = np.zeros((self.n_uv, self.n_uv, len(self.frequencies)),dtype=np.float32)
             
         if self.include_fourierGaussianBeam is True:
             
@@ -764,19 +765,19 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
         return visgrid, kernel_weights
 
     @staticmethod
-    def _grid_visibilities_buff(n_uv,visgrid_buff_real,visgrid_buff_imag,weights_buff, visibilities,frequencies,a,baselines,centres,sigfreq, min_attenuation = 1e-3, N = 30):
+    def _grid_visibilities_buff(n_uv,visgrid_buff_real,visgrid_buff_imag,weights_buff, visibilities,frequencies,a,baselines,centres,sigfreq, min_attenuation = 1e-3, N = 12):
 
         logger.info("Gridding the visibilities")
 
         nfreq = len(frequencies)
 
-        vis_real = np.frombuffer(visgrid_buff_real).reshape(n_uv,n_uv,nfreq)
-        vis_imag = np.frombuffer(visgrid_buff_imag).reshape(n_uv,n_uv,nfreq)
+        vis_real = np.frombuffer(visgrid_buff_real,dtype=np.float32).reshape(n_uv,n_uv,nfreq)
+        vis_imag = np.frombuffer(visgrid_buff_imag,dtype=np.float32).reshape(n_uv,n_uv,nfreq)
         vis_real[:] = 0
         vis_imag[:] = 0
 
         if(weights_buff is not None):
-            weights = np.frombuffer(weights_buff).reshape(n_uv,n_uv,nfreq)
+            weights = np.frombuffer(weights_buff,dtype=np.float32).reshape(n_uv,n_uv,nfreq)
             weights[:] = 0
 
         for ii in range(nfreq):
@@ -814,7 +815,7 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
                     if weights_buff is not None:
                         weights[indx_u:indx_u+beamushape, indx_v:indx_v+beamvshape, ii] += beam[:ibeamindx_u,:ibeamindx_v] / beamsum
 
-    def grid_visibilities_parallel(self, visibilities,min_attenuation = 1e-3, N = 30):
+    def grid_visibilities_parallel(self, visibilities,min_attenuation = 1e-3, N = 12):
         """
         Grid a set of visibilities from baselines onto a UV grid.
 
@@ -845,7 +846,7 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
 
         processes = []
         
-        visgrid = np.zeros((self.n_uv, self.n_uv, len(self.frequencies)), dtype=np.complex128)
+        visgrid = np.zeros((self.n_uv, self.n_uv, len(self.frequencies)), dtype=np.complex64)
 
 
         if(os.path.exists(self.datafile[0][:-4]+".kernel_weights.npy")):
@@ -857,7 +858,7 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
             kernel_weights=None
 
         if kernel_weights is None:
-            weights = np.zeros((self.n_uv, self.n_uv, len(self.frequencies)))
+            weights = np.zeros((self.n_uv, self.n_uv, len(self.frequencies)),dtype=np.float32)
 
         visgrid_buff_real = []
         visgrid_buff_imag = []
@@ -887,11 +888,11 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
 
         for i in range(self.nparallel):
 
-            visgrid[:,:,nfreqstart[i]:nfreqend[i]].real = np.frombuffer(visgrid_buff_real[i]).reshape(self.n_uv,self.n_uv,nfreqend[i]-nfreqstart[i])
-            visgrid[:,:,nfreqstart[i]:nfreqend[i]].imag = np.frombuffer(visgrid_buff_imag[i]).reshape(self.n_uv,self.n_uv,nfreqend[i]-nfreqstart[i])
+            visgrid[:,:,nfreqstart[i]:nfreqend[i]].real = np.frombuffer(visgrid_buff_real[i],dtype=np.float32).reshape(self.n_uv,self.n_uv,nfreqend[i]-nfreqstart[i])
+            visgrid[:,:,nfreqstart[i]:nfreqend[i]].imag = np.frombuffer(visgrid_buff_imag[i],dtype=np.float32).reshape(self.n_uv,self.n_uv,nfreqend[i]-nfreqstart[i])
 
             if(kernel_weights is None):
-                weights[:,:,nfreqstart[i]:nfreqend[i]] = np.frombuffer(weights_buff[i]).reshape(self.n_uv,self.n_uv,nfreqend[i]-nfreqstart[i])
+                weights[:,:,nfreqstart[i]:nfreqend[i]] = np.frombuffer(weights_buff[i],dtype=np.float32).reshape(self.n_uv,self.n_uv,nfreqend[i]-nfreqstart[i])
 
         if kernel_weights is None:
             kernel_weights = weights
@@ -994,6 +995,7 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
                 
                 all_weights = []
                 for ii in range(self.n_obs):
+                    num_freq = len(self.frequencies)
                     
                     num_freq = len(self.frequencies[int(ii*num_freq): int((ii+1)*num_freq)])
                     
