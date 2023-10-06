@@ -1050,18 +1050,18 @@ class LikelihoodInstrumental2D(LikelihoodBaseFile):
 
         W = (frequencies.max() - frequencies.min()) / n_obs
         L = int(len(frequencies) / n_obs)
-        
-        for ii in range(n_obs):
-            if len(np.shape(vis))==2:
-                ft = np.fft.fftshift(np.fft.fft(vis[:,ii*L:(ii+1)*L] * taper(L), axis=-1), axes=-1) * np.diff(frequencies)[0]
-            else:
-                ft = powerbox.dft.fft(vis[:,:,ii*L:(ii+1)*L] * taper(L), W, axes=(2,), a=0, b=2 * np.pi)[0]
-        
-            all_fts.append(ft)
-            
-        ft = np.array(all_fts)
 
-        return ft
+        for ii in range(n_obs):
+            vis[:,:,ii*L:(ii+1)*L]*=taper(L)
+            if len(np.shape(vis))==2:
+                ft = np.fft.fftshift(np.fft.fft(vis[:,ii*L:(ii+1)*L], axis=-1), axes=-1) * np.diff(frequencies)[0]
+            else:
+                ft = powerbox.dft.fft(vis[:,:,ii*L:(ii+1)*L], W, axes=(2,), a=0, b=2 * np.pi)[0]
+
+            all_fts.append(ft)
+        all_fts = np.array(all_fts)
+
+        return all_fts
 
 def _produce_mock(self, params, i):
     """Produces a mock power spectrum for purposes of getting numerical_covariances"""

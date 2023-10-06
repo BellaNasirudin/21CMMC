@@ -380,6 +380,7 @@ class CoreInstrumental(CoreBase):
                  sky_extent=3, n_cells=300, include_beam=False, beam_type=None, padding_size = None, tot_daily_obs_time = 6,
                  beam_synthesis_time = 600, declination=-26., RA_pointing = 0, include_earth_rotation_synthesis = False,
                  same_foreground = False, simulate_foreground=True, sample_gain = False, sample_beam = False, diffuse_realization = 0, eor_model=70,
+                 input_data_dir = "data",
                  **kwargs):
         """
         Parameters
@@ -473,6 +474,7 @@ class CoreInstrumental(CoreBase):
         self.diffuse_realization = diffuse_realization
         self.eor_model = eor_model
 
+        self.input_data_dir = input_data_dir
 
         if self.effective_collecting_area > self.tile_diameter ** 2:
             warnings.warn("The effective collecting area (%s) is greater than the tile diameter squared!")
@@ -571,8 +573,11 @@ class CoreInstrumental(CoreBase):
 
         frequencies = 1420.0e6 / (1 + redshifts) #np.arange(106e6, 196.9e6, 100000)#
 
-        if not np.all(frequencies == self.instrumental_frequencies):
-            box = self.interpolate_frequencies(box, frequencies, self.instrumental_frequencies) #cw.interpolate_map_frequencies(box, frequencies, self.instrumental_frequencies)
+        if(len(frequencies)==len(self.instrumental_frequencies)):
+            if not np.all(frequencies == self.instrumental_frequencies):
+                box = self.interpolate_frequencies(box, frequencies, self.instrumental_frequencies) #cw.interpolate_map_frequencies(box, frequencies, self.instrumental_frequencies)
+        else:
+            box = self.interpolate_frequencies(box, frequencies, self.instrumental_frequencies) #cw.interpolate_map_frequencies(box, frequencies, self.instrumental_frequencies
         
         # new_box = np.zeros((self.n_cells, self.n_cells, len(self.instrumental_frequencies)))
         # # pad box and change to mK
@@ -648,6 +653,7 @@ class CoreInstrumental(CoreBase):
 
         # Get the basic signal lightcone out of context
         lightcone = ctx.get("lightcone") # None #fits.getdata("/home/anasirudin/fg_challenge/data/My_EoR_H21cm_new.fits", ext=0) # 
+        ctx.remove("lightcone")
 
         # Compute visibilities from EoR simulation
         if lightcone is not None:
@@ -673,9 +679,7 @@ class CoreInstrumental(CoreBase):
                 
                 logger.info("Because simulate_foreground == False, reading existing data and setting it as default")
 
-                file_dir = "/home/anasirudin/fg_challenge/data/"
-
-                allForegroundsJy = fits.getdata(file_dir + "merged%i.fits" %self.diffuse_realization, ext=0, memmap=False).T[:,:, -len(self.instrumental_frequencies):]
+                allForegroundsJy = fits.getdata(os.path.join(self.input_data_dir,"merged%i.fits") %self.diffuse_realization, ext=0, memmap=False).T[:,:, -len(self.instrumental_frequencies):]
 
                 # ## this is for calculating SKA stuff
                 # allForegroundsJy = np.load(file_dir + "new_image_115_170MHz.npz")["image"] / np.pi * np.deg2rad(0.0553607952110976) * np.deg2rad(0.04114777022790) / (4 * np.log(2))
@@ -754,10 +758,10 @@ class CoreInstrumental(CoreBase):
             logger.info("Adding gleam sources")
             # add gleam stuff as well
             if (self.padding_size is not None):
-                gleam_fg = np.load("/home/anasirudin/fg_challenge/data/fg_sky150_181_196MHz_11520_new.npz")["sky"][:,:,-len(self.instrumental_frequencies):]#
+                gleam_fg = np.load(os.path.join(self.input_data_dir,"fg_sky150_181_196MHz_11520_new.npz"))["sky"][:,:,-len(self.instrumental_frequencies):]#
 
             else:
-                gleam_fg = np.load("/home/anasirudin/fg_challenge/data/fg_sky150_106_196MHz_512_new.npz")["sky"][:,:,-len(self.instrumental_frequencies):]
+                gleam_fg = np.load(os.path.join(self.input_data_dir,"fg_sky150_106_196MHz_512_new.npz"))["sky"][:,:,-len(self.instrumental_frequencies):]
                 #gleam180_sky301-106_136MHz.npz
 
             gleam_fg[gleam_fg<0] = 0
@@ -883,9 +887,9 @@ class CoreInstrumental(CoreBase):
                 logger.info("Using SKADC beam")
                 pix_res = 0.004444444444445
                 if self.padding_size is not None:
-                    beam = fits.getdata("/home/anasirudin/fg_challenge/data/station_beam.fits", ext=0)[-len(self.instrumental_frequencies):].T
+                    beam = fits.getdata(os.path.join(self.input_data_dir,"station_beam.fits"), ext=0)[-len(self.instrumental_frequencies):].T
                 else:
-                    beam = fits.getdata("/home/anasirudin/fg_challenge/data/station_beam.fits", ext=0)[-len(self.instrumental_frequencies):,380:-380,380:-380].T
+                    beam = fits.getdata(os.path.join(self.input_data_dir,"station_beam.fits"), ext=0)[-len(self.instrumental_frequencies):,380:-380,380:-380].T
 
                 if np.shape(lightcone)[0]!=np.shape(beam)[0]:
                     logger.info("Interpolating beam to match the simulation resolution")

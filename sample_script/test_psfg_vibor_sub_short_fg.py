@@ -23,6 +23,8 @@ model_name = "testing_stuff" #%(fband_name, eor_model)
 DEBUG = int(os.environ.get("DEBUG", 0))
 LOGLEVEL = 2
 
+input_data_dir = "/data/dev/tmp/data/"
+
 # for the instrument
 # Instrument Options
 antenna_posfile = "new_ska"#'ska_low_v5' #'mwa_phase2'#
@@ -163,6 +165,7 @@ class CustomCoreInstrument(CoreInstrumental):
                          tot_daily_obs_time = tot_daily_obs_time, beam_synthesis_time = beam_synthesis_time,
                          padding_size = padding_size, include_earth_rotation_synthesis = include_earth_rotation_synthesis,
                          include_beam=True, beam_type=name_extension, diffuse_realization=diffuse_realization,
+                         input_data_dir=input_data_dir,
                          **kwargs)
 
 class CustomLikelihood(LikelihoodInstrumental2D):
